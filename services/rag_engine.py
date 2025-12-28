@@ -1,68 +1,27 @@
 
-import logging
-import threading
-
 import google.generativeai as genai
-
 
 from config import get_settings
 from services.vector_store import vector_store
 
-logger = logging.getLogger(__name__)
-
-# Gemini embedding model produces 768-dimensional vectors
-EMBEDDING_DIMENSION = 768
+settings = get_settings()
+genai.configure(api_key=settings.gemini_api_key)
 
 class RAGEngine:
     def __init__(self):
-        """Initialize RAG engine with Gemini embeddings and generation."""
-        self._configured = False
-        self._generation_model = None
-        self._config_lock = threading.Lock()
-        
-    def _ensure_configured(self):
-        """Ensure Gemini API is configured (thread-safe)."""
-        if not self._configured:
-            with self._config_lock:
-                if not self._configured:
-                    settings = get_settings()
-                    genai.configure(api_key=settings.gemini_api_key)
-                    self._configured = True
-                    logger.info("✅ Gemini API configured")
-        
-    def preload_models(self):
-        """
-        Pre-configure Gemini API.
-        Called after startup to ensure API is ready before first request.
-        """
-        logger.info("⏳ Configuring Gemini API...")
-        try:
-            self._ensure_configured()
-            # Test embedding to verify API works
-            test_result = genai.embed_content(
-                model="models/text-embedding-004",
-                content="test",
-                task_type="retrieval_document"
-            )
-            logger.info(f"✅ Gemini Embeddings ready! (dimension: {len(test_result['embedding'])})")
-        except Exception as e:
-            logger.error(f"❌ Gemini configuration failed: {e}")
-    
-    def is_ready(self) -> bool:
-        """Check if Gemini API is configured and ready."""
-        return self._configured
-        
+        """Initialize RAG engine with local embeddings and Gemini generation."""
+        # Use local embedding model (no API calls!)
+        self._embedding_model = None
+        # Keep Gemini only for answer generation
+        self.generation_model = genai.GenerativeModel("gemini-2.0-flash-exp")
+
     @property
-    def generation_model(self):
-        """Lazy load Gemini generation model."""
-        if self._generation_model is None:
-            self._ensure_configured()
-            self._generation_model = genai.GenerativeModel("gemini-2.0-flash-exp")
-        return self._generation_model
+    def embedding_model(self):
+        """Not used for Gemini embeddings but kept for interface compatibility if needed."""
+        return None
 
     def generate_embedding(self, text: str) -> list[float]:
-        """Generate embedding using Google Gemini API."""
-        self._ensure_configured()
+        """Generate embedding using Gemini API."""
         result = genai.embed_content(
             model="models/text-embedding-004",
             content=text,
@@ -72,7 +31,6 @@ class RAGEngine:
 
     def generate_query_embedding(self, query: str) -> list[float]:
         """Generate embedding for a query using Gemini API."""
-        self._ensure_configured()
         result = genai.embed_content(
             model="models/text-embedding-004",
             content=query,
