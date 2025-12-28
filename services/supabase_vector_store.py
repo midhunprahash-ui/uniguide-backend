@@ -340,11 +340,12 @@ class SupabaseVectorStore:
     def sync_with_uploads(self, upload_directory: str) -> dict:
         """
         Sync vector store with uploads folder.
-        Removes documents that no longer exist on disk.
+        NOTE: This is now NON-DESTRUCTIVE. It only logs orphaned documents
+        but does NOT delete them, since files are stored in Supabase Storage.
         """
         import os
 
-        # Get all files in uploads directory
+        # Get all files in uploads directory (local cache only)
         existing_files = set()
         if os.path.exists(upload_directory):
             existing_files = set(os.listdir(upload_directory))
@@ -352,17 +353,16 @@ class SupabaseVectorStore:
         # Get all documents from database
         stored_docs = self.get_all_source_files()
 
-        # Find documents to remove
-        to_remove = stored_docs - existing_files
+        # Find documents not in local cache (this is normal for cloud storage)
+        not_in_local = stored_docs - existing_files
 
-        removed = []
-        for filename in to_remove:
-            self.delete_by_source_file(filename)
-            removed.append(filename)
+        if not_in_local:
+            logger.info(f"📁 {len(not_in_local)} documents in DB (files in Supabase Storage)")
 
         return {
-            "removed": removed,
-            "kept": list(stored_docs - set(removed))
+            "removed": [],  # We no longer auto-delete
+            "kept": list(stored_docs),
+            "cloud_only": list(not_in_local)
         }
 
     def clear_all(self) -> None:

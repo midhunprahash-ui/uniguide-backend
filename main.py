@@ -78,9 +78,9 @@ async def background_sync():
 
         logger.info(f"📊 Vector store: {vector_store.get_collection_count()} chunks")
 
-        removed = sync_result.get("removed", [])
-        if removed:
-            logger.info(f"🔄 Synced: Removed {len(removed)} orphaned documents")
+        cloud_only = sync_result.get("cloud_only", [])
+        if cloud_only:
+            logger.info(f"☁️  {len(cloud_only)} documents stored in Supabase Storage")
         logger.info("✅ Background sync completed")
         
     except Exception as e:
