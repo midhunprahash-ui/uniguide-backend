@@ -1,79 +1,133 @@
-"""Chat session management for conversation history."""
+"""
+Chat session management for conversation history.
+Uses Supabase for persistent storage across page refreshes.
+"""
 import uuid
-from datetime import datetime, timedelta
+import logging
+from datetime import datetime
+from typing import Optional
+
+from services.supabase_client import get_supabase_admin_client
+
+logger = logging.getLogger(__name__)
 
 
-class ChatSession:
-    """Represents a single chat session with history."""
+class SupabaseChatSessionManager:
+    """Manages chat sessions persisted in Supabase."""
 
-    def __init__(self, session_id: str):
-        self.session_id = session_id
-        self.messages: list[dict[str, str]] = []
-        self.created_at = datetime.now()
-        self.last_activity = datetime.now()
+    def __init__(self):
+        self._client = None
 
-    def add_message(self, role: str, content: str):
-        """Add a message to the session history."""
-        self.messages.append({
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now().isoformat()
-        })
-        self.last_activity = datetime.now()
+    @property
+    def client(self):
+        """Lazy load Supabase client."""
+        if self._client is None:
+            self._client = get_supabase_admin_client()
+        return self._client
 
-    def get_history(self, limit: int | None = None) -> list[dict[str, str]]:
-        """Get conversation history, optionally limited to recent messages."""
-        if limit:
-            return self.messages[-limit:]
-        return self.messages
-
-class ChatSessionManager:
-    """Manages multiple chat sessions in memory."""
-
-    def __init__(self, session_timeout_hours: int = 24):
-        self.sessions: dict[str, ChatSession] = {}
-        self.session_timeout = timedelta(hours=session_timeout_hours)
-
-    def create_session(self) -> str:
+    def create_session(
+        self,
+        category: str = "rules",
+        year: str = "all",
+        department: str = "all"
+    ) -> str:
         """Create a new chat session and return its ID."""
         session_id = str(uuid.uuid4())
-        self.sessions[session_id] = ChatSession(session_id)
-        return session_id
+        
+        try:
+            self.client.table("chat_sessions").insert({
+                "id": session_id,
+                "category": category,
+                "year": year,
+                "department": department,
+                "updated_at": datetime.now().isoformat()
+            }).execute()
+            
+            logger.info(f"Created new chat session: {session_id}")
+            return session_id
+            
+        except Exception as e:
+            logger.error(f"Error creating session: {e}")
+            # Fallback to UUID for now
+            return session_id
 
-    def get_session(self, session_id: str) -> ChatSession | None:
-        """Get a session by ID, return None if not found or expired."""
-        session = self.sessions.get(session_id)
-        if session:
-            # Check if session has expired
-            if datetime.now() - session.last_activity > self.session_timeout:
-                del self.sessions[session_id]
-                return None
-        return session
+    def get_session(self, session_id: str) -> Optional[dict]:
+        """Get a session by ID, return None if not found."""
+        try:
+            result = self.client.table("chat_sessions").select("*").eq("id", session_id).single().execute()
+            return result.data
+        except Exception as e:
+            logger.debug(f"Session not found: {session_id}")
+            return None
 
-    def add_message(self, session_id: str, role: str, content: str) -> bool:
-        """Add a message to a session. Returns False if session doesn't exist."""
-        session = self.get_session(session_id)
-        if session:
-            session.add_message(role, content)
+    def add_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        sources: list = None
+    ) -> bool:
+        """Add a message to a session. Returns False if failed."""
+        try:
+            # Insert message
+            self.client.table("chat_messages").insert({
+                "session_id": session_id,
+                "role": role,
+                "content": content,
+                "sources": sources or []
+            }).execute()
+            
+            # Update session's last activity
+            self.client.table("chat_sessions").update({
+                "updated_at": datetime.now().isoformat()
+            }).eq("id", session_id).execute()
+            
             return True
-        return False
+            
+        except Exception as e:
+            logger.error(f"Error adding message: {e}")
+            return False
 
-    def get_history(self, session_id: str, limit: int | None = 5) -> list[dict[str, str]]:
+    def get_history(
+        self,
+        session_id: str,
+        limit: int = 20
+    ) -> list[dict[str, str]]:
         """Get conversation history for a session."""
-        session = self.get_session(session_id)
-        if session:
-            return session.get_history(limit)
-        return []
+        try:
+            result = self.client.table("chat_messages").select(
+                "role, content, sources, created_at"
+            ).eq(
+                "session_id", session_id
+            ).order(
+                "created_at", desc=False
+            ).limit(limit).execute()
+            
+            return [
+                {
+                    "role": msg["role"],
+                    "content": msg["content"],
+                    "sources": msg.get("sources", [])
+                }
+                for msg in result.data
+            ]
+            
+        except Exception as e:
+            logger.error(f"Error getting history: {e}")
+            return []
 
-    def cleanup_expired_sessions(self):
-        """Remove expired sessions from memory."""
-        now = datetime.now()
-        expired = [
-            sid for sid, session in self.sessions.items()
-            if now - session.last_activity > self.session_timeout
-        ]
-        for sid in expired:
-            del self.sessions[sid]
+    def get_session_with_history(self, session_id: str) -> Optional[dict]:
+        """Get session details along with its message history."""
+        session = self.get_session(session_id)
+        if not session:
+            return None
+            
+        history = self.get_history(session_id)
+        return {
+            **session,
+            "messages": history
+        }
+
 
 # Global session manager instance
-session_manager = ChatSessionManager()
+session_manager = SupabaseChatSessionManager()
