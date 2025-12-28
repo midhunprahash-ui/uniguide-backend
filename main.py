@@ -49,23 +49,38 @@ async def startup_event():
     # Create upload directory
     os.makedirs(settings.upload_directory, exist_ok=True)
 
-    # Initialize and sync vector store
+    # Initialize and sync vector store in background
+    import asyncio
+    asyncio.create_task(background_sync())
+    
+    logger.info("✅ Application started successfully")
+    logger.info(f"📁 Upload directory: {settings.upload_directory}")
+    logger.info("🗄️  Database: Supabase pgvector")
+
+
+async def background_sync():
+    """Run vector store sync in background to avoid blocking startup."""
     from services.vector_store import vector_store
-
+    
+    logger.info("⏳ Starting background vector store sync...")
     try:
-        sync_result = vector_store.sync_with_uploads(settings.upload_directory)
+        # Run synchronous code in thread pool
+        import asyncio
+        sync_result = await asyncio.to_thread(
+            vector_store.sync_with_uploads, 
+            settings.upload_directory
+        )
 
-        logger.info("✅ Application started successfully")
-        logger.info(f"📁 Upload directory: {settings.upload_directory}")
-        logger.info("🗄️  Database: Supabase pgvector")
         logger.info(f"📊 Vector store: {vector_store.get_collection_count()} chunks")
 
         removed = sync_result.get("removed", [])
         if removed:
             logger.info(f"🔄 Synced: Removed {len(removed)} orphaned documents")
+        logger.info("✅ Background sync completed")
+        
     except Exception as e:
-        logger.error(f"⚠️ Startup warning: {e}")
-        logger.info("📁 Application started (vector store will initialize on first use)")
+        logger.error(f"⚠️ Background sync warning: {e}")
+        logger.info("📁 Application running (vector store will initialize on first use)")
 
 
 @app.get("/")

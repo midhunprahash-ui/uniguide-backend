@@ -12,12 +12,21 @@ class RAGEngine:
     def __init__(self):
         """Initialize RAG engine with local embeddings and Gemini generation."""
         # Use local embedding model (no API calls!)
-        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        self._embedding_model = None
         # Keep Gemini only for answer generation
         self.generation_model = genai.GenerativeModel("gemini-2.0-flash-exp")
 
+    @property
+    def embedding_model(self):
+        """Lazy load embedding model."""
+        if self._embedding_model is None:
+            print("Loading embedding model...")
+            self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        return self._embedding_model
+
     def generate_embedding(self, text: str) -> list[float]:
         """Generate embedding using local sentence-transformers model."""
+        # Use property access to trigger load
         embedding = self.embedding_model.encode(text, convert_to_tensor=False)
         return embedding.tolist()
 
