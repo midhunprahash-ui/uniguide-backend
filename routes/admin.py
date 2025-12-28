@@ -563,12 +563,33 @@ async def refresh_registry(admin: dict = Depends(require_admin)):
 
 
 @router.delete("/clear-all")
-async def clear_vector_store(admin: dict = Depends(require_admin)):
+async def clear_vector_store(
+    confirm: str = None,
+    admin: dict = Depends(require_admin)
+):
     """
     Clear all documents from the vector store.
     WARNING: This removes all vectors and cannot be undone.
+    
+    Requires confirm=YES_DELETE_ALL to proceed.
     """
+    if confirm != "YES_DELETE_ALL":
+        raise HTTPException(
+            status_code=400,
+            detail="This action will DELETE ALL documents permanently. Pass confirm=YES_DELETE_ALL to proceed."
+        )
+    
     try:
+        # Also clear from Supabase Storage
+        from services import supabase_storage
+        client = get_supabase_admin_client()
+        
+        # Get all documents with storage paths
+        docs = client.table("documents").select("storage_path").execute()
+        for doc in docs.data:
+            if doc.get("storage_path"):
+                supabase_storage.delete_file(doc["storage_path"])
+        
         vector_store.clear_all()
 
         return {
