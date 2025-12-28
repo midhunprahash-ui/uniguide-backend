@@ -73,11 +73,14 @@ async def admin_login(credentials: AdminLogin):
     Returns:
         JWT access token from Supabase Auth
     """
-    client = get_supabase_admin_client()
+    # Create a fresh client for auth verification to avoid mutating the shared helper
+    # We use anon key for login (as a user would)
+    from supabase import create_client
+    auth_client = create_client(settings.supabase_url, settings.supabase_anon_key)
 
     try:
         # Use email as username for Supabase Auth
-        response = client.auth.sign_in_with_password({
+        response = auth_client.auth.sign_in_with_password({
             "email": credentials.username,
             "password": credentials.password
         })
@@ -87,6 +90,7 @@ async def admin_login(credentials: AdminLogin):
 
         # Check if user is admin
         user_id = response.user.id
+        client = get_supabase_admin_client()
         profile = client.table("profiles").select("role").eq("id", user_id).single().execute()
 
         if not profile.data or profile.data["role"] not in ["admin", "superadmin"]:
