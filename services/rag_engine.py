@@ -93,6 +93,7 @@ class RAGEngine:
         sources: list[str],
         year: str,
         department: str,
+        category: str = "rules",
         conversation_history: list[dict[str, str]] = None
     ) -> str:
         """Generate answer using Gemini with retrieved context."""
@@ -149,21 +150,27 @@ Student Question: {query}
 
 === CONVERSATIONAL HANDLING ===
 
+**CURRENT CATEGORY: {category}**
+
 **GREETINGS (hi, hello, hey, good morning, etc.):**
-Respond warmly and offer to help. Example:
-"Hello! 👋 How can I help you today? Feel free to ask me about rules & regulations, exam schedules, fee details, attendance requirements, or any other academic matters!"
+Respond warmly and offer to help based on the current category. Examples:
+- If category is 'rules': "Hello! 👋 How can I help you today? Feel free to ask me about rules & regulations, disciplinary policies, or academic guidelines!"
+- If category is 'schedules': "Hello! 👋 I can help you with schedule information! Ask me about exam dates, class timings, or academic calendar."
+- If category is 'admissions': "Hello! 👋 I'm here to help with admissions! Ask me about admission procedures, eligibility, fees, or deadlines."
+- If category is 'timetables': "Hello! 👋 I can help you with timetable information! Ask me about class schedules, lab timings, or weekly routines."
+- If category is 'circulars': "Hello! 👋 I can help you with circulars! Ask me about recent announcements, notices, or updates."
 
 **THANK YOU / GRATITUDE:**
 Respond warmly. Example:
-"You're welcome! 😊 Feel free to ask if you have any more questions. I'm here to help!"
+"You're welcome! 😊 Feel free to ask if you have any more questions about {category}. I'm here to help!"
 
 **GOODBYE / BYE:**
 Respond warmly. Example:
-"Goodbye! Have a great day! 👋 Come back anytime you need help."
+"Goodbye! Have a great day! 👋 Come back anytime you need help with {category} information."
 
-**IRRELEVANT QUESTIONS (not related to college/academics):**
+**IRRELEVANT QUESTIONS (not related to college/academics or current category):**
 Politely redirect. Example:
-"I don't have information about that topic. I'm here to help you with questions about St. Joseph's - like rules & regulations, exam schedules, fee details, attendance, admission procedures, and academic matters. How can I assist you with any of these?"
+"I don't have information about that topic. I'm currently helping you with **{category}**. Feel free to ask me about this, or switch categories for other topics like rules & regulations, exam schedules, fee details, attendance, or admission procedures!"
 
 === RESPONSE STRATEGY ===
 
@@ -302,7 +309,7 @@ Be specific about dates, events, or actions mentioned in the circular."""
 
         # Generate answer
         # Pass the full list of sources (corresponding to chunks) and conversation history to generate_answer
-        answer = self.generate_answer(question, context_chunks, sources, year, department, conversation_history or [])
+        answer = self.generate_answer(question, context_chunks, sources, year, department, category, conversation_history or [])
 
         # Deduplicate sources
         unique_sources = list(set(sources))
