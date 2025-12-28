@@ -131,6 +131,8 @@ async def upload_document(
     Returns:
         Document metadata
     """
+    from services import supabase_storage
+    
     # Validate file type
     allowed_extensions = ['pdf', 'png', 'jpg', 'jpeg', 'txt']
     file_ext = file.filename.split('.')[-1].lower()
@@ -149,7 +151,7 @@ async def upload_document(
             detail=f"Invalid category. Allowed: {', '.join(valid_categories)}"
         )
 
-    # Save file
+    # Save file temporarily for processing
     os.makedirs(settings.upload_directory, exist_ok=True)
     file_path = os.path.join(settings.upload_directory, file.filename)
 
@@ -157,7 +159,7 @@ async def upload_document(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Process and store document
+        # Process and store document (creates embeddings in DB)
         result = document_processor.process_and_store_document(
             file_path=file_path,
             filename=file.filename,
@@ -167,6 +169,23 @@ async def upload_document(
             file_type=file_ext
         )
 
+        # Upload file to Supabase Storage for permanent storage
+        storage_path = supabase_storage.upload_file(
+            file_path=file_path,
+            category=category,
+            filename=file.filename
+        )
+
+        # Update document record with storage path
+        client = get_supabase_admin_client()
+        doc_result = client.table("documents").select("id").eq("filename", file.filename).single().execute()
+        if doc_result.data:
+            document_id = doc_result.data["id"]
+            client.table("documents").update({
+                "storage_path": storage_path
+            }).eq("id", document_id).execute()
+            result["storage_path"] = storage_path
+
         # If it's a circular, generate summary and register it
         if category == "circulars":
             from services.rag_engine import rag_engine
@@ -174,14 +193,7 @@ async def upload_document(
             extracted_text = result.get("extracted_text", "")
             summaries = rag_engine.generate_circular_summary(extracted_text, file.filename)
 
-            # Register in circulars table
-            client = get_supabase_admin_client()
-
-            # Get the document ID from the result
-            doc_result = client.table("documents").select("id").eq("filename", file.filename).single().execute()
             if doc_result.data:
-                document_id = doc_result.data["id"]
-
                 # Update document with summaries
                 client.table("documents").update({
                     "one_line_summary": summaries["one_line"],
@@ -196,6 +208,10 @@ async def upload_document(
                     "brief_summary": summaries["brief"],
                     "is_active": True
                 }).execute()
+
+        # Clean up local file (it's now in Supabase Storage)
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
         return result
 
@@ -359,6 +375,8 @@ async def delete_document(doc_id: str, admin: dict = Depends(require_admin)):
     """
     Delete a document and all its chunks.
     """
+    from services import supabase_storage
+    
     client = get_supabase_admin_client()
 
     # Get document info
@@ -370,10 +388,15 @@ async def delete_document(doc_id: str, admin: dict = Depends(require_admin)):
     doc_info = doc_result.data
 
     try:
-        # Delete from Supabase (chunks cascade automatically)
+        # Delete from Supabase Storage if storage_path exists
+        storage_path = doc_info.get("storage_path")
+        if storage_path:
+            supabase_storage.delete_file(storage_path)
+
+        # Delete from Supabase database (chunks cascade automatically)
         client.table("documents").delete().eq("id", doc_id).execute()
 
-        # Delete file if exists
+        # Delete local file if exists (legacy cleanup)
         file_path = os.path.join(settings.upload_directory, doc_info["filename"])
         if os.path.exists(file_path):
             os.remove(file_path)
