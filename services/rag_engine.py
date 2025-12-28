@@ -1,6 +1,5 @@
 
 import google.generativeai as genai
-from sentence_transformers import SentenceTransformer
 
 from config import get_settings
 from services.vector_store import vector_store
@@ -18,22 +17,26 @@ class RAGEngine:
 
     @property
     def embedding_model(self):
-        """Lazy load embedding model."""
-        if self._embedding_model is None:
-            print("Loading embedding model...")
-            self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-        return self._embedding_model
+        """Not used for Gemini embeddings but kept for interface compatibility if needed."""
+        return None
 
     def generate_embedding(self, text: str) -> list[float]:
-        """Generate embedding using local sentence-transformers model."""
-        # Use property access to trigger load
-        embedding = self.embedding_model.encode(text, convert_to_tensor=False)
-        return embedding.tolist()
+        """Generate embedding using Gemini API."""
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=text,
+            task_type="retrieval_document"
+        )
+        return result['embedding']
 
     def generate_query_embedding(self, query: str) -> list[float]:
-        """Generate embedding for a query using local model."""
-        embedding = self.embedding_model.encode(query, convert_to_tensor=False)
-        return embedding.tolist()
+        """Generate embedding for a query using Gemini API."""
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=query,
+            task_type="retrieval_query"
+        )
+        return result['embedding']
 
     def retrieve_context(
         self,
