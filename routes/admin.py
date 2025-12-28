@@ -415,8 +415,10 @@ async def rename_document(
     admin: dict = Depends(require_admin)
 ):
     """
-    Rename a document file.
+    Rename a document file (both in Storage and DB).
     """
+    from services import supabase_storage
+    
     client = get_supabase_admin_client()
 
     doc_result = client.table("documents").select("*").eq("id", doc_id).single().execute()
@@ -425,6 +427,7 @@ async def rename_document(
         raise HTTPException(status_code=404, detail="Document not found")
 
     old_filename = doc_result.data["filename"]
+    storage_path = doc_result.data.get("storage_path")
     new_filename = request.new_filename
 
     if not new_filename or new_filename.strip() == "":
@@ -435,23 +438,26 @@ async def rename_document(
     if '.' not in new_filename:
         new_filename = f"{new_filename}.{old_ext}"
 
-    old_file_path = os.path.join(settings.upload_directory, old_filename)
-    new_file_path = os.path.join(settings.upload_directory, new_filename)
-
-    if os.path.exists(new_file_path) and new_filename != old_filename:
-        raise HTTPException(status_code=400, detail="A file with this name already exists")
-
     try:
-        # Rename file on disk
-        if os.path.exists(old_file_path):
-            os.rename(old_file_path, new_file_path)
+        new_storage_path = storage_path
+        
+        # Rename in Supabase Storage if storage_path exists
+        if storage_path:
+            new_storage_path = supabase_storage.rename_file(storage_path, new_filename)
 
-        # Update in Supabase
+        # Update in Supabase DB
         client.table("documents").update({
             "filename": new_filename,
             "original_filename": new_filename,
-            "file_path": f"uploads/{new_filename}"
+            "file_path": f"uploads/{new_filename}",
+            "storage_path": new_storage_path
         }).eq("id", doc_id).execute()
+
+        # Also rename local file if exists (legacy)
+        old_file_path = os.path.join(settings.upload_directory, old_filename)
+        new_file_path = os.path.join(settings.upload_directory, new_filename)
+        if os.path.exists(old_file_path):
+            os.rename(old_file_path, new_file_path)
 
         return {
             "message": "Document renamed successfully",
@@ -599,3 +605,50 @@ async def clear_vector_store(
     except Exception as e:
         logger.error(f"Error clearing vector store: {e}")
         raise HTTPException(status_code=500, detail=f"Error clearing vector store: {str(e)}")
+
+
+@router.get("/health-check")
+async def health_check(admin: dict = Depends(require_admin)):
+    """
+    Check data consistency between Supabase Storage and database.
+    Reports orphaned files (in Storage but not DB) and missing files (in DB but not Storage).
+    """
+    from services import supabase_storage
+    
+    client = get_supabase_admin_client()
+    
+    # Get all files from Storage
+    storage_files = supabase_storage.list_all_files()
+    storage_paths = {f["storage_path"] for f in storage_files}
+    
+    # Get all documents from DB
+    db_result = client.table("documents").select("id, filename, storage_path, status, category").execute()
+    db_docs = db_result.data or []
+    db_storage_paths = {doc.get("storage_path") for doc in db_docs if doc.get("storage_path")}
+    
+    # Find inconsistencies
+    orphaned_files = storage_paths - db_storage_paths  # In Storage but not in DB
+    missing_files = db_storage_paths - storage_paths   # In DB but not in Storage
+    
+    # Get pending/failed uploads
+    pending_docs = [doc for doc in db_docs if doc.get("status") == "pending"]
+    failed_docs = [doc for doc in db_docs if doc.get("status") == "failed"]
+    
+    is_healthy = len(orphaned_files) == 0 and len(missing_files) == 0 and len(pending_docs) == 0
+    
+    return {
+        "healthy": is_healthy,
+        "summary": {
+            "total_storage_files": len(storage_files),
+            "total_db_documents": len(db_docs),
+            "orphaned_files_count": len(orphaned_files),
+            "missing_files_count": len(missing_files),
+            "pending_uploads": len(pending_docs),
+            "failed_uploads": len(failed_docs)
+        },
+        "orphaned_files": list(orphaned_files),  # Files in Storage with no DB record
+        "missing_files": list(missing_files),     # DB records with no Storage file
+        "pending_documents": [{"id": d["id"], "filename": d["filename"]} for d in pending_docs],
+        "failed_documents": [{"id": d["id"], "filename": d["filename"]} for d in failed_docs]
+    }
+
