@@ -198,3 +198,91 @@ def file_exists(storage_path: str) -> bool:
         
     except Exception:
         return False
+
+
+def list_all_files(category: str = None) -> list[dict]:
+    """
+    List all files in storage buckets.
+    
+    Args:
+        category: Optional category to filter by. If None, lists all buckets.
+    
+    Returns:
+        List of dicts with bucket, filename, and size info
+    """
+    client = get_supabase_admin_client()
+    all_files = []
+    
+    buckets_to_check = [get_bucket_for_category(category)] if category else CATEGORY_BUCKET_MAP.values()
+    
+    for bucket in buckets_to_check:
+        try:
+            files = client.storage.from_(bucket).list()
+            for f in files:
+                if f.get("name") and not f.get("name").startswith("."):
+                    all_files.append({
+                        "bucket": bucket,
+                        "filename": f.get("name"),
+                        "size": f.get("metadata", {}).get("size", 0),
+                        "storage_path": f"{bucket}/{f.get('name')}"
+                    })
+        except Exception as e:
+            logger.warning(f"Failed to list files in bucket {bucket}: {e}")
+    
+    return all_files
+
+
+def rename_file(old_storage_path: str, new_filename: str) -> str:
+    """
+    Rename a file in Supabase Storage by copying to new name and deleting old.
+    
+    Args:
+        old_storage_path: Current path in format "bucket/filename"
+        new_filename: New filename (same bucket)
+    
+    Returns:
+        New storage path
+    """
+    client = get_supabase_admin_client()
+    
+    parts = old_storage_path.split("/", 1)
+    if len(parts) != 2:
+        raise ValueError(f"Invalid storage path: {old_storage_path}")
+    
+    bucket, old_filename = parts
+    
+    if old_filename == new_filename:
+        return old_storage_path  # No change needed
+    
+    try:
+        # Download file content
+        file_data = client.storage.from_(bucket).download(old_filename)
+        
+        # Determine content type
+        ext = new_filename.split(".")[-1].lower()
+        content_type_map = {
+            "pdf": "application/pdf",
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "txt": "text/plain",
+        }
+        content_type = content_type_map.get(ext, "application/octet-stream")
+        
+        # Upload with new name
+        client.storage.from_(bucket).upload(
+            path=new_filename,
+            file=file_data,
+            file_options={"content-type": content_type, "upsert": "true"}
+        )
+        
+        # Delete old file
+        client.storage.from_(bucket).remove([old_filename])
+        
+        new_storage_path = f"{bucket}/{new_filename}"
+        logger.info(f"✅ Renamed file in Storage: {old_storage_path} -> {new_storage_path}")
+        return new_storage_path
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to rename file in Storage: {e}")
+        raise
