@@ -26,7 +26,7 @@ class VectorStore(SupabaseVectorStore):
         """Initialize the Supabase-based vector store."""
         super().__init__()
         self.collection_name = "documents"  # For logging compatibility
-        self.vector_size = 384  # all-MiniLM-L6-v2 dimension
+        self.vector_size = 768  # Gemini text-embedding-004 dimension
         logger.info("VectorStore initialized with Supabase pgvector backend")
 
 
