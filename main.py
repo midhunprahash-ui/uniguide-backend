@@ -51,12 +51,10 @@ async def startup_event():
     # Create upload directory
     os.makedirs(settings.upload_directory, exist_ok=True)
 
+
     # Initialize and sync vector store in background
     import asyncio
     asyncio.create_task(background_sync())
-    
-    # Preload ML models in background to avoid timeout on first request
-    asyncio.create_task(background_model_preload())
     
     logger.info("✅ Application started successfully")
     logger.info(f"📁 Upload directory: {settings.upload_directory}")
@@ -88,16 +86,6 @@ async def background_sync():
         logger.info("📁 Application running (vector store will initialize on first use)")
 
 
-async def background_model_preload():
-    """Preload ML models in background to avoid timeout on first request."""
-    import asyncio
-    from services.rag_engine import rag_engine
-    
-    try:
-        # Run model loading in thread pool (it's blocking I/O)
-        await asyncio.to_thread(rag_engine.preload_models)
-    except Exception as e:
-        logger.error(f"⚠️ Model preload error: {e}")
 
 
 @app.get("/")
