@@ -1,6 +1,6 @@
 
 import google.generativeai as genai
-from sentence_transformers import SentenceTransformer
+
 
 from config import get_settings
 from services.vector_store import vector_store
@@ -26,6 +26,7 @@ class RAGEngine:
         """Lazy load embedding model."""
         if self._embedding_model is None:
             print("Loading embedding model...")
+            from sentence_transformers import SentenceTransformer
             self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
         return self._embedding_model
 
