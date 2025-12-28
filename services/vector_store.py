@@ -12,7 +12,6 @@ from config import get_settings
 from services.supabase_vector_store import SupabaseVectorStore
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
 
 
 class VectorStore(SupabaseVectorStore):

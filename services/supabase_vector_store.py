@@ -14,8 +14,15 @@ class SupabaseVectorStore:
 
     def __init__(self):
         """Initialize Supabase vector store client."""
-        self.client = get_supabase_admin_client()
-        logger.info("Supabase Vector Store initialized")
+        self._client = None
+        
+    @property
+    def client(self):
+        """Lazy load Supabase client."""
+        if self._client is None:
+            self._client = get_supabase_admin_client()
+            logger.info("Supabase Vector Store initialized")
+        return self._client
 
     def add_document(
         self,

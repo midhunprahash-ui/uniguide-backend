@@ -5,16 +5,21 @@ from sentence_transformers import SentenceTransformer
 from config import get_settings
 from services.vector_store import vector_store
 
-settings = get_settings()
-genai.configure(api_key=settings.gemini_api_key)
-
 class RAGEngine:
     def __init__(self):
         """Initialize RAG engine with local embeddings and Gemini generation."""
-        # Use local embedding model (no API calls!)
+        # Defer configuration to first usage
         self._embedding_model = None
-        # Keep Gemini only for answer generation
-        self.generation_model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        self._generation_model = None
+        
+    @property
+    def generation_model(self):
+        """Lazy load Gemini model."""
+        if self._generation_model is None:
+            settings = get_settings()
+            genai.configure(api_key=settings.gemini_api_key)
+            self._generation_model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        return self._generation_model
 
     @property
     def embedding_model(self):
