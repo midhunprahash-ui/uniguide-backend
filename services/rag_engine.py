@@ -1,9 +1,14 @@
 
+import logging
+import threading
+
 import google.generativeai as genai
 
 
 from config import get_settings
 from services.vector_store import vector_store
+
+logger = logging.getLogger(__name__)
 
 class RAGEngine:
     def __init__(self):
@@ -11,6 +16,25 @@ class RAGEngine:
         # Defer configuration to first usage
         self._embedding_model = None
         self._generation_model = None
+        self._model_loading = False
+        self._model_lock = threading.Lock()
+        
+    def preload_models(self):
+        """
+        Preload embedding model in background.
+        Called after startup to ensure model is ready before first request.
+        """
+        logger.info("⏳ Preloading embedding model in background...")
+        try:
+            # Access property to trigger load
+            _ = self.embedding_model
+            logger.info("✅ Embedding model preload complete!")
+        except Exception as e:
+            logger.error(f"❌ Model preload failed: {e}")
+    
+    def is_ready(self) -> bool:
+        """Check if embedding model is loaded and ready."""
+        return self._embedding_model is not None
         
     @property
     def generation_model(self):
@@ -23,11 +47,15 @@ class RAGEngine:
 
     @property
     def embedding_model(self):
-        """Lazy load embedding model."""
+        """Lazy load embedding model with thread safety."""
         if self._embedding_model is None:
-            print("Loading embedding model...")
-            from sentence_transformers import SentenceTransformer
-            self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+            with self._model_lock:
+                # Double-check after acquiring lock
+                if self._embedding_model is None:
+                    logger.info("Loading embedding model...")
+                    from sentence_transformers import SentenceTransformer
+                    self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+                    logger.info("Embedding model loaded successfully!")
         return self._embedding_model
 
     def generate_embedding(self, text: str) -> list[float]:
