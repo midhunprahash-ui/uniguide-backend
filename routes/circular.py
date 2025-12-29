@@ -179,6 +179,7 @@ async def chat_about_circular(query: CircularChatQuery):
         # Query RAG with circulars category filter
         result = rag_engine.query(
             question=query.question,
+            stream="all",  # Circulars apply to all streams
             year="all",  # Circulars apply to all years
             department="all",  # Circulars apply to all departments
             category="circulars",
