@@ -290,12 +290,21 @@ async def get_documents_by_category(admin: dict = Depends(require_admin)):
     Get all documents grouped by category.
     """
     client = get_supabase_admin_client()
+    admin_org_id = admin.get("org_id")
+
+    # Get dynamic categories for this org
+    cat_result = client.table("categories").select("slug").eq("org_id", admin_org_id).execute()
+    category_slugs = [c["slug"] for c in cat_result.data] if cat_result.data else []
 
     categories_data = []
     total_documents = 0
 
-    for category in VALID_CATEGORIES:
-        result = client.table("documents").select("*").eq("category", category).order("created_at", desc=True).execute()
+    for category in category_slugs:
+        # Filter documents by category AND org_id
+        query = client.table("documents").select("*").eq("category", category).order("created_at", desc=True)
+        if admin_org_id:
+            query = query.eq("org_id", admin_org_id)
+        result = query.execute()
 
         category_docs = []
         for doc in result.data:
