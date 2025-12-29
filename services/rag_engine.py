@@ -3,6 +3,7 @@ import google.generativeai as genai
 
 from config import get_settings
 from services.vector_store import vector_store
+from services.supabase_client import get_supabase_admin_client
 
 settings = get_settings()
 genai.configure(api_key=settings.gemini_api_key)
@@ -14,6 +15,26 @@ class RAGEngine:
         self._embedding_model = None
         # Keep Gemini only for answer generation
         self.generation_model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        # Cache for category names
+        self._category_cache = {}
+
+    def get_category_name(self, category_slug: str) -> str:
+        """Look up category name from database by slug."""
+        if category_slug in self._category_cache:
+            return self._category_cache[category_slug]
+        
+        try:
+            client = get_supabase_admin_client()
+            result = client.table("categories").select("name").eq("slug", category_slug).limit(1).execute()
+            if result.data and len(result.data) > 0:
+                name = result.data[0]["name"]
+                self._category_cache[category_slug] = name
+                return name
+        except Exception as e:
+            print(f"Warning: Could not look up category name: {e}")
+        
+        # Fallback to slug title-cased
+        return category_slug.replace("-", " ").title()
 
     @property
     def embedding_model(self):
@@ -101,6 +122,9 @@ class RAGEngine:
         from datetime import datetime
         current_date = datetime.now().strftime("%Y-%m-%d")
 
+        # Look up the human-readable category name
+        category_name = self.get_category_name(category)
+
         # Group chunks by source document to prevent confusion
         source_grouped = defaultdict(list)
         for chunk, source in zip(context_chunks, sources, strict=False):
@@ -150,41 +174,42 @@ Student Question: {query}
 
 === CONVERSATIONAL HANDLING ===
 
-**CURRENT CATEGORY: {category}**
+**CURRENT CATEGORY: {category_name}**
 
 **GREETINGS (hi, hello, hey, good morning, etc.):**
 Respond warmly and offer to help based on the current category. Examples:
-- If category is 'rules': "Hello! 👋 How can I help you today? Feel free to ask me about rules & regulations, disciplinary policies, or academic guidelines!"
-- If category is 'schedules': "Hello! 👋 I can help you with schedule information! Ask me about exam dates, class timings, or academic calendar."
-- If category is 'admissions': "Hello! 👋 I'm here to help with admissions! Ask me about admission procedures, eligibility, fees, or deadlines."
-- If category is 'timetables': "Hello! 👋 I can help you with timetable information! Ask me about class schedules, lab timings, or weekly routines."
-- If category is 'circulars': "Hello! 👋 I can help you with circulars! Ask me about recent announcements, notices, or updates."
+- If in Rules & Regulations: "Hello! 👋 How can I help you today? Feel free to ask me about rules & regulations, disciplinary policies, or academic guidelines!"
+- If in Schedules / Leaves: "Hello! 👋 I can help you with schedule information! Ask me about exam dates, class timings, or academic calendar."
+- If in Admissions: "Hello! 👋 I'm here to help with admissions! Ask me about admission procedures, eligibility, fees, or deadlines."
+- If in Timetables: "Hello! 👋 I can help you with timetable information! Ask me about class schedules, lab timings, or weekly routines."
+- If in Circulars: "Hello! 👋 I can help you with circulars! Ask me about recent announcements, notices, or updates."
+- For any other category: "Hello! 👋 I'm here to help with {category_name}! What would you like to know?"
 
 **THANK YOU / GRATITUDE:**
 Respond warmly. Example:
-"You're welcome! 😊 Feel free to ask if you have any more questions about {category}. I'm here to help!"
+"You're welcome! 😊 Feel free to ask if you have any more questions about {category_name}. I'm here to help!"
 
 **GOODBYE / BYE:**
 Respond warmly. Example:
-"Goodbye! Have a great day! 👋 Come back anytime you need help with {category} information."
+"Goodbye! Have a great day! 👋 Come back anytime you need help with {category_name} information."
 
 **ACKNOWLEDGMENTS (okay, ok, alright, got it, I see, etc.):**
 Respond naturally and encourage further questions. Vary your response - examples:
-- "Great! Is there anything else you'd like to know about {category}?"
+- "Great! Is there anything else you'd like to know about {category_name}?"
 - "Alright! Feel free to ask if you have more questions."
-- "Got it! Let me know if you need any other information about {category}."
+- "Got it! Let me know if you need any other information about {category_name}."
 
 **GIBBERISH / UNCLEAR INPUT (random letters, typos, or unclear messages):**
 Respond helpfully without being robotic. Vary your response - examples:
-- "I didn't quite catch that. Could you rephrase your question? I'm here to help with {category}! 😊"
+- "I didn't quite catch that. Could you rephrase your question? I'm here to help with {category_name}! 😊"
 - "Hmm, I'm not sure what you meant. Try asking me something like 'What are the exam dates?' or 'What are the attendance rules?'"
-- "I couldn't understand that. Would you like to ask something about {category}? I'm happy to help!"
+- "I couldn't understand that. Would you like to ask something about {category_name}? I'm happy to help!"
 
 **IRRELEVANT QUESTIONS (not related to college/academics or current category):**
 Politely redirect with varied responses - examples:
-- "I don't have information about that. I'm here to help with **{category}** - feel free to ask me anything about it!"
-- "That's outside my knowledge area. I specialize in {category}. What would you like to know about that?"
-- "I can't help with that topic, but I'd love to answer questions about {category}! What's on your mind?"
+- "I don't have information about that. I'm here to help with **{category_name}** - feel free to ask me anything about it!"
+- "That's outside my knowledge area. I specialize in {category_name}. What would you like to know about that?"
+- "I can't help with that topic, but I'd love to answer questions about {category_name}! What's on your mind?"
 
 === RESPONSE STRATEGY ===
 

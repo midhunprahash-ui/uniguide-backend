@@ -110,20 +110,30 @@ async def create_category(
         raise HTTPException(status_code=400, detail="Category with this slug already exists")
     
     # Insert category
-    result = client.table("categories").insert({
-        "org_id": org_id,
-        "name": category.name,
-        "slug": category.slug,
-        "description": category.description,
-        "icon": category.icon,
-        "color": category.color,
-        "is_published": category.is_published,
-        "is_admin_only": category.is_admin_only,
-        "sort_order": category.sort_order
-    }).execute()
-    
-    logger.info(f"Created category: {category.name} (slug: {category.slug})")
-    return result.data[0]
+    try:
+        result = client.table("categories").insert({
+            "org_id": org_id,
+            "name": category.name,
+            "slug": category.slug,
+            "description": category.description,
+            "icon": category.icon,
+            "color": category.color,
+            "is_published": category.is_published,
+            "is_admin_only": category.is_admin_only,
+            "sort_order": category.sort_order
+        }).execute()
+        
+        if not result.data:
+            logger.error(f"Failed to create category - no data returned")
+            raise HTTPException(status_code=400, detail="Failed to create category - database returned no data")
+        
+        logger.info(f"Created category: {category.name} (slug: {category.slug})")
+        return result.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating category: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to create category: {str(e)}")
 
 
 @router.put("/{category_id}", response_model=CategoryResponse)
