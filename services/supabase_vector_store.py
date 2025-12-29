@@ -188,6 +188,7 @@ class SupabaseVectorStore:
         filter_year = None
         filter_department = None
         filter_category = None
+        filter_org_id = None
 
         if where:
             # Handle $and operator
@@ -210,11 +211,14 @@ class SupabaseVectorStore:
                                 filter_department = next((v for v in vals if v != "all"), vals[0] if vals else None)
                             else:
                                 filter_department = value
+                        elif key == "org_id":
+                            filter_org_id = value
             else:
                 # Simple key-value filters
                 filter_year = where.get("year")
                 filter_department = where.get("department")
                 filter_category = where.get("category")
+                filter_org_id = where.get("org_id")
 
                 # Handle $in for simple filters too
                 if isinstance(filter_year, dict) and "$in" in filter_year:
@@ -233,7 +237,8 @@ class SupabaseVectorStore:
                 "match_threshold": 0.3,
                 "filter_year": filter_year,
                 "filter_department": filter_department,
-                "filter_category": filter_category
+                "filter_category": filter_category,
+                "filter_org_id": filter_org_id
             }
         ).execute()
 
