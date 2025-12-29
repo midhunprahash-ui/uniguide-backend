@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
-from routes import admin, chat, circular
+from routes import admin, chat, circular, categories, departments, organizations
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -33,7 +33,7 @@ app.add_middleware(
         "http://localhost:3000",
         "https://uniguide-sjit.vercel.app"
     ],
-    allow_origin_regex="https://.*\\.vercel\\.app",
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -43,6 +43,9 @@ app.add_middleware(
 app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
 app.include_router(circular.router, prefix="/api/circular", tags=["Circular"])
+app.include_router(categories.router, prefix="/api/categories", tags=["Categories"])
+app.include_router(departments.router, prefix="/api/departments", tags=["Departments"])
+app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])
 
 
 @app.on_event("startup")
