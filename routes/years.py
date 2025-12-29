@@ -34,7 +34,7 @@ class YearResponse(BaseModel):
     is_active: bool
 
 
-@router.get("/years", response_model=list[YearResponse])
+@router.get("", response_model=list[YearResponse])
 async def list_years(
     stream_id: Optional[str] = None,
     include_inactive: bool = False,
@@ -56,7 +56,7 @@ async def list_years(
     return result.data
 
 
-@router.post("/years", response_model=YearResponse)
+@router.post("", response_model=YearResponse)
 async def create_year(
     year: YearCreate,
     admin: dict = Depends(require_admin)
@@ -81,7 +81,7 @@ async def create_year(
     raise HTTPException(status_code=400, detail="Failed to create year")
 
 
-@router.put("/years/{year_id}", response_model=YearResponse)
+@router.put("/{year_id}", response_model=YearResponse)
 async def update_year(
     year_id: str,
     year: YearUpdate,
@@ -101,7 +101,7 @@ async def update_year(
     raise HTTPException(status_code=404, detail="Year not found")
 
 
-@router.delete("/years/{year_id}")
+@router.delete("/{year_id}")
 async def delete_year(
     year_id: str,
     admin: dict = Depends(require_admin)

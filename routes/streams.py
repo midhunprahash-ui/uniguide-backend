@@ -36,7 +36,7 @@ class StreamResponse(BaseModel):
     is_active: bool
 
 
-@router.get("/streams", response_model=list[StreamResponse])
+@router.get("", response_model=list[StreamResponse])
 async def list_streams(
     include_inactive: bool = False,
     admin: dict = Depends(require_admin)
@@ -54,7 +54,7 @@ async def list_streams(
     return result.data
 
 
-@router.post("/streams", response_model=StreamResponse)
+@router.post("", response_model=StreamResponse)
 async def create_stream(
     stream: StreamCreate,
     admin: dict = Depends(require_admin)
@@ -92,7 +92,7 @@ async def create_stream(
     raise HTTPException(status_code=400, detail="Failed to create stream")
 
 
-@router.put("/streams/{stream_id}", response_model=StreamResponse)
+@router.put("/{stream_id}", response_model=StreamResponse)
 async def update_stream(
     stream_id: str,
     stream: StreamUpdate,
@@ -112,7 +112,7 @@ async def update_stream(
     raise HTTPException(status_code=404, detail="Stream not found")
 
 
-@router.delete("/streams/{stream_id}")
+@router.delete("/{stream_id}")
 async def delete_stream(
     stream_id: str,
     admin: dict = Depends(require_admin)
