@@ -36,7 +36,8 @@ class SupabaseVectorStore:
         file_size_bytes: int | None = None,
         mime_type: str | None = None,
         summaries: dict | None = None,
-        uploaded_by: str | None = None
+        uploaded_by: str | None = None,
+        org_id: str | None = None
     ) -> str:
         """
         Add a document and its chunks to the vector store.
@@ -53,6 +54,7 @@ class SupabaseVectorStore:
             mime_type: Optional MIME type
             summaries: Optional dict with 'one_line' and 'brief' keys
             uploaded_by: Optional user ID who uploaded
+            org_id: Optional organization ID for multi-tenant isolation
 
         Returns:
             Document ID
@@ -69,7 +71,8 @@ class SupabaseVectorStore:
             "mime_type": mime_type,
             "one_line_summary": summaries.get("one_line") if summaries else None,
             "brief_summary": summaries.get("brief") if summaries else None,
-            "uploaded_by": uploaded_by
+            "uploaded_by": uploaded_by,
+            "org_id": org_id
         }
 
         doc_result = self.client.table("documents").insert(doc_data).execute()
@@ -144,6 +147,7 @@ class SupabaseVectorStore:
                     "year": meta.get("year", "all"),
                     "department": meta.get("department", "all"),
                     "category": meta.get("category", "General"),
+                    "org_id": meta.get("org_id"),
                 }
                 doc_result = self.client.table("documents").insert(doc_data).execute()
                 document_id = doc_result.data[0]["id"]

@@ -145,7 +145,8 @@ Extract everything now:"""
         year: str,
         department: str,
         category: str,
-        file_type: str
+        file_type: str,
+        org_id: str | None = None
     ) -> dict:
         """Process document and store in vector database."""
         # Extract text based on file type
@@ -183,7 +184,8 @@ Extract everything now:"""
                 "category": category,
                 "source_file": filename,
                 "chunk_id": i,
-                "doc_id": doc_id
+                "doc_id": doc_id,
+                "org_id": org_id
             }
             metadatas.append(metadata)
             ids.append(f"{doc_id}_{i}")

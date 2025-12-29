@@ -191,7 +191,8 @@ async def upload_document(
             year=year,
             department=department,
             category=category,
-            file_type=file_ext
+            file_type=file_ext,
+            org_id=admin.get("org_id")
         )
 
         # Upload file to Supabase Storage for permanent storage

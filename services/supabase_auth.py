@@ -107,7 +107,7 @@ async def require_admin(
     Require admin or superadmin role.
 
     Returns:
-        User data dict with role
+        User data dict with role and org_id
 
     Raises:
         HTTPException: If not admin
@@ -119,7 +119,16 @@ async def require_admin(
             detail="User ID not found"
         )
 
-    role = await get_user_role(user_id)
+    # Fetch role and org_id from profile
+    client = get_supabase_admin_client()
+    try:
+        result = client.table("profiles").select("role, org_id").eq("id", user_id).single().execute()
+        role = result.data.get("role", "student") if result.data else "student"
+        org_id = result.data.get("org_id") if result.data else None
+    except Exception as e:
+        logger.error(f"Error getting user profile: {e}")
+        role = "student"
+        org_id = None
 
     if role not in ["admin", "superadmin"]:
         raise HTTPException(
@@ -127,7 +136,7 @@ async def require_admin(
             detail="Admin access required"
         )
 
-    return {**user, "role": role}
+    return {**user, "role": role, "org_id": org_id}
 
 
 # Legacy compatibility - for existing code that uses verify_token
