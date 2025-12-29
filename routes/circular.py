@@ -42,34 +42,77 @@ def register_circular(doc_id: str, filename: str, year: str, department: str,
         logger.error(f"Error registering circular: {e}")
 
 
-def get_latest_circular():
-    """Get the most recently uploaded active circular from Supabase."""
+def get_latest_circular(org_id: str = None):
+    """Get the most recently uploaded active circular from Supabase for a specific org."""
     client = get_supabase_admin_client()
 
     try:
+        # If no org_id provided, get default org (sjit)
+        if not org_id:
+            org = client.table("organizations").select("id").eq("slug", "sjit").single().execute()
+            org_id = org.data.get("id") if org.data else None
+
+        if not org_id:
+            return None
+
+        # First, get document IDs for this org's circulars category
+        docs = client.table("documents").select("id").eq(
+            "org_id", org_id
+        ).eq("category", "circulars").execute()
+
+        if not docs.data:
+            return None
+
+        doc_ids = [d["id"] for d in docs.data]
+
+        # Query circulars for these documents
         result = client.table("circulars").select(
             "*, documents(*)"
-        ).eq("is_active", True).order(
+        ).eq("is_active", True).in_(
+            "document_id", doc_ids
+        ).order(
             "published_at", desc=True
         ).limit(1).execute()
 
-        if not result.data:
-            return None
+        if result.data:
+            circular = result.data[0]
+            doc = circular.get("documents", {})
 
-        circular = result.data[0]
-        doc = circular.get("documents", {})
+            return {
+                "id": circular["id"],
+                "document_id": circular["document_id"],
+                "filename": doc.get("filename", circular["title"]),
+                "year": doc.get("year", "all"),
+                "department": doc.get("department", "all"),
+                "upload_date": circular["published_at"],
+                "one_line_summary": circular.get("one_line_summary"),
+                "brief_summary": circular.get("brief_summary"),
+                "chunk_count": 0
+            }
 
-        return {
-            "id": circular["id"],
-            "document_id": circular["document_id"],
-            "filename": doc.get("filename", circular["title"]),
-            "year": doc.get("year", "all"),
-            "department": doc.get("department", "all"),
-            "upload_date": circular["published_at"],
-            "one_line_summary": circular.get("one_line_summary"),
-            "brief_summary": circular.get("brief_summary"),
-            "chunk_count": 0  # Could count from document_chunks if needed
-        }
+        # Fallback: If no circular entry exists, return latest document with category=circulars
+        # This handles documents uploaded before circular registration was implemented
+        doc_result = client.table("documents").select("*").eq(
+            "org_id", org_id
+        ).eq("category", "circulars").order(
+            "created_at", desc=True
+        ).limit(1).execute()
+
+        if doc_result.data:
+            doc = doc_result.data[0]
+            return {
+                "id": doc["id"],
+                "document_id": doc["id"],
+                "filename": doc.get("filename", "Circular"),
+                "year": doc.get("year", "all"),
+                "department": doc.get("department", "all"),
+                "upload_date": doc.get("created_at"),
+                "one_line_summary": doc.get("one_line_summary", "New circular available"),
+                "brief_summary": doc.get("brief_summary", "Click to learn more about this circular."),
+                "chunk_count": 0
+            }
+
+        return None
     except Exception as e:
         logger.error(f"Error getting latest circular: {e}")
         return None

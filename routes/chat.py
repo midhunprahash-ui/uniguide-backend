@@ -61,6 +61,7 @@ async def query_chat_stream(query: ChatQuery):
                 
                 for chunk_json in rag_engine.query_stream(
                     question=query.question,
+                    stream=query.stream,
                     year=query.year,
                     department=query.department,
                     category=query.category,
@@ -125,6 +126,7 @@ async def query_chat(query: ChatQuery):
         # Query RAG with history and category filter
         result = rag_engine.query(
             question=query.question,
+            stream=query.stream,
             year=query.year,
             department=query.department,
             category=query.category,

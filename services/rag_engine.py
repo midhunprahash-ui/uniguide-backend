@@ -17,12 +17,16 @@ class RAGEngine:
         self.generation_model = genai.GenerativeModel("gemini-2.0-flash-exp")
         # Cache for category names
         self._category_cache = {}
+        # Cache for stream to year codes mapping (via departments)
+        self._stream_years_cache = {}
+        # Cache for department to year codes mapping
+        self._department_years_cache = {}
 
     def get_category_name(self, category_slug: str) -> str:
         """Look up category name from database by slug."""
         if category_slug in self._category_cache:
             return self._category_cache[category_slug]
-        
+
         try:
             client = get_supabase_admin_client()
             result = client.table("categories").select("name").eq("slug", category_slug).limit(1).execute()
@@ -32,9 +36,67 @@ class RAGEngine:
                 return name
         except Exception as e:
             print(f"Warning: Could not look up category name: {e}")
-        
+
         # Fallback to slug title-cased
         return category_slug.replace("-", " ").title()
+
+    def get_year_codes_for_department(self, department_code: str) -> list[str]:
+        """Get all year codes that belong to a specific department."""
+        if department_code in self._department_years_cache:
+            return self._department_years_cache[department_code]
+
+        try:
+            client = get_supabase_admin_client()
+            # First get the department ID from code
+            dept_result = client.table("departments").select("id").eq("code", department_code).eq("is_active", True).limit(1).execute()
+            if not dept_result.data:
+                return []
+
+            department_id = dept_result.data[0]["id"]
+
+            # Get all year codes for this department
+            years_result = client.table("years").select("code").eq("department_id", department_id).eq("is_active", True).execute()
+            if years_result.data:
+                year_codes = [y["code"] for y in years_result.data]
+                self._department_years_cache[department_code] = year_codes
+                return year_codes
+        except Exception as e:
+            print(f"Warning: Could not look up years for department {department_code}: {e}")
+
+        return []
+
+    def get_year_codes_for_stream(self, stream_code: str) -> list[str]:
+        """Get all year codes for all departments under a specific stream."""
+        if stream_code in self._stream_years_cache:
+            return self._stream_years_cache[stream_code]
+
+        try:
+            client = get_supabase_admin_client()
+            # First get the stream ID from code
+            stream_result = client.table("streams").select("id").eq("code", stream_code).eq("is_active", True).limit(1).execute()
+            if not stream_result.data:
+                return []
+
+            stream_id = stream_result.data[0]["id"]
+
+            # Get all departments for this stream
+            depts_result = client.table("departments").select("id").eq("stream_id", stream_id).eq("is_active", True).execute()
+            if not depts_result.data:
+                return []
+
+            dept_ids = [d["id"] for d in depts_result.data]
+
+            # Get all year codes from all departments
+            years_result = client.table("years").select("code").in_("department_id", dept_ids).eq("is_active", True).execute()
+            if years_result.data:
+                # Deduplicate year codes (same year number might exist in multiple departments)
+                year_codes = list(set([y["code"] for y in years_result.data]))
+                self._stream_years_cache[stream_code] = year_codes
+                return year_codes
+        except Exception as e:
+            print(f"Warning: Could not look up years for stream {stream_code}: {e}")
+
+        return []
 
     @property
     def embedding_model(self):
@@ -62,6 +124,7 @@ class RAGEngine:
     def retrieve_context(
         self,
         query: str,
+        stream: str,
         year: str,
         department: str,
         category: str,
@@ -82,10 +145,27 @@ class RAGEngine:
              print("WARNING: No category provided, defaulting to 'rules'")
              conditions.append({"category": "rules"})
 
-        if year and year.lower() != "all":
-            conditions.append({"year": {"$in": [year, "all"]}})
+        # Handle hierarchy filtering: Stream -> Department -> Year
+        # Department filter
         if department and department.lower() != "all":
             conditions.append({"department": {"$in": [department, "all"]}})
+
+        # Year filter with cascade logic
+        if year and year.lower() != "all":
+            # Specific year selected - use that year
+            conditions.append({"year": {"$in": [year, "all"]}})
+        elif department and department.lower() != "all":
+            # No specific year but department selected - filter by all years in that department
+            dept_year_codes = self.get_year_codes_for_department(department)
+            if dept_year_codes:
+                # Include "all" to match documents that apply to all years
+                conditions.append({"year": {"$in": dept_year_codes + ["all"]}})
+        elif stream and stream.lower() != "all":
+            # No specific year or department but stream selected - filter by all years in all departments of that stream
+            stream_year_codes = self.get_year_codes_for_stream(stream)
+            if stream_year_codes:
+                # Include "all" to match documents that apply to all years
+                conditions.append({"year": {"$in": stream_year_codes + ["all"]}})
 
         # Combine conditions with $and if we have multiple
         if len(conditions) == 1:
@@ -348,6 +428,7 @@ Be specific about dates, events, or actions mentioned in the circular."""
     def query(
         self,
         question: str,
+        stream: str,
         year: str,
         department: str,
         category: str,
@@ -355,7 +436,7 @@ Be specific about dates, events, or actions mentioned in the circular."""
     ) -> dict[str, any]:
         """Complete RAG pipeline: retrieve context and generate answer."""
         # Retrieve relevant context
-        context_chunks, sources = self.retrieve_context(question, year, department, category)
+        context_chunks, sources = self.retrieve_context(question, stream, year, department, category)
 
         if not context_chunks:
             return {
@@ -560,6 +641,7 @@ Answer:"""
     def query_stream(
         self,
         question: str,
+        stream: str,
         year: str,
         department: str,
         category: str,
@@ -567,9 +649,9 @@ Answer:"""
     ):
         """Complete RAG pipeline with streaming: retrieve context and stream answer."""
         import json
-        
+
         # Retrieve relevant context
-        context_chunks, sources = self.retrieve_context(question, year, department, category)
+        context_chunks, sources = self.retrieve_context(question, stream, year, department, category)
 
         # Deduplicate sources
         unique_sources = list(set(sources))

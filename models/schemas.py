@@ -7,6 +7,7 @@ VALID_CATEGORIES = ['rules', 'admissions', 'schedules', 'timetables', 'abhs', 'c
 
 class ChatQuery(BaseModel):
     question: str
+    stream: str = "all"  # Stream filter (e.g., "UG", "PG", or "all")
     year: str
     department: str
     category: str = "schedules"  # rules, admissions, schedules, abhs, circulars

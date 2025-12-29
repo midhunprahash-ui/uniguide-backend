@@ -194,15 +194,17 @@ async def delete_category(
     if not existing.data:
         raise HTTPException(status_code=404, detail="Category not found")
     
-    # Check if category has documents
-    docs = client.table("documents").select("id", count="exact").eq("category_id", category_id).execute()
+    # Check if category has documents (use category slug from existing data)
+    category_slug = existing.data.get("slug")
+    docs = client.table("documents").select("id", count="exact").eq("org_id", org_id).eq("category", category_slug).execute()
     if docs.count and docs.count > 0:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail=f"Cannot delete category with {docs.count} documents. Move or delete documents first."
         )
-    
-    client.table("categories").delete().eq("id", category_id).execute()
+
+    # Delete with org_id for safety
+    client.table("categories").delete().eq("id", category_id).eq("org_id", org_id).execute()
     logger.info(f"Deleted category: {category_id}")
     return {"message": "Category deleted successfully"}
 

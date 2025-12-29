@@ -2,8 +2,10 @@
 UniGuide Backend API
 RAG system for college rules and regulations using Supabase.
 """
+import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,11 +22,56 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-# Create FastAPI app
+
+async def background_sync():
+    """Run vector store sync in background to avoid blocking startup."""
+    from services.vector_store import vector_store
+
+    logger.info("⏳ Starting background vector store sync...")
+    try:
+        # Run synchronous code in thread pool
+        sync_result = await asyncio.to_thread(
+            vector_store.sync_with_uploads,
+            settings.upload_directory
+        )
+
+        logger.info(f"📊 Vector store: {vector_store.get_collection_count()} chunks")
+
+        cloud_only = sync_result.get("cloud_only", [])
+        if cloud_only:
+            logger.info(f"☁️  {len(cloud_only)} documents stored in Supabase Storage")
+        logger.info("✅ Background sync completed")
+
+    except Exception as e:
+        logger.error(f"⚠️ Background sync warning: {e}")
+        logger.info("📁 Application running (vector store will initialize on first use)")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    # Startup
+    os.makedirs(settings.upload_directory, exist_ok=True)
+
+    # Initialize and sync vector store in background
+    asyncio.create_task(background_sync())
+
+    logger.info("✅ Application started successfully")
+    logger.info(f"📁 Upload directory: {settings.upload_directory}")
+    logger.info("🗄️  Database: Supabase pgvector")
+
+    yield
+
+    # Shutdown (if needed)
+    logger.info("👋 Application shutting down")
+
+
+# Create FastAPI app with lifespan
 app = FastAPI(
     title="UniGuide API",
     description="RAG system for college rules and regulations",
-    version="2.0.0"
+    version="2.0.0",
+    lifespan=lifespan
 )
 
 # Add rate limiter to app
@@ -60,49 +107,6 @@ app.include_router(departments.router, prefix="/api/departments", tags=["Departm
 app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])
 app.include_router(streams.router, prefix="/api/streams", tags=["Streams"])
 app.include_router(years.router, prefix="/api/years", tags=["Years"])
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize application on startup."""
-    # Create upload directory
-    os.makedirs(settings.upload_directory, exist_ok=True)
-
-
-    # Initialize and sync vector store in background
-    import asyncio
-    asyncio.create_task(background_sync())
-    
-    logger.info("✅ Application started successfully")
-    logger.info(f"📁 Upload directory: {settings.upload_directory}")
-    logger.info("🗄️  Database: Supabase pgvector")
-
-
-async def background_sync():
-    """Run vector store sync in background to avoid blocking startup."""
-    from services.vector_store import vector_store
-    
-    logger.info("⏳ Starting background vector store sync...")
-    try:
-        # Run synchronous code in thread pool
-        import asyncio
-        sync_result = await asyncio.to_thread(
-            vector_store.sync_with_uploads, 
-            settings.upload_directory
-        )
-
-        logger.info(f"📊 Vector store: {vector_store.get_collection_count()} chunks")
-
-        cloud_only = sync_result.get("cloud_only", [])
-        if cloud_only:
-            logger.info(f"☁️  {len(cloud_only)} documents stored in Supabase Storage")
-        logger.info("✅ Background sync completed")
-        
-    except Exception as e:
-        logger.error(f"⚠️ Background sync warning: {e}")
-        logger.info("📁 Application running (vector store will initialize on first use)")
-
-
 
 
 @app.get("/")

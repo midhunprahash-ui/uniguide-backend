@@ -204,7 +204,8 @@ async def upload_document(
 
         # Update document record with storage path
         client = get_supabase_admin_client()
-        doc_result = client.table("documents").select("id").eq("filename", file.filename).single().execute()
+        org_id = admin.get("org_id")
+        doc_result = client.table("documents").select("id").eq("filename", file.filename).eq("org_id", org_id).single().execute()
         if doc_result.data:
             document_id = doc_result.data["id"]
             client.table("documents").update({
@@ -259,7 +260,8 @@ async def list_documents(
     """
     client = get_supabase_admin_client()
 
-    query = client.table("documents").select("*")
+    org_id = admin.get("org_id")
+    query = client.table("documents").select("*").eq("org_id", org_id)
     if category:
         query = query.eq("category", category)
 
@@ -354,7 +356,8 @@ async def get_documents_for_category(
             detail=f"Invalid category. Allowed: {', '.join(valid_category_slugs)}"
         )
 
-    result = client.table("documents").select("*").eq("category", category).order("created_at", desc=True).execute()
+    org_id = admin.get("org_id")
+    result = client.table("documents").select("*").eq("org_id", org_id).eq("category", category).order("created_at", desc=True).execute()
 
     docs = []
     for doc in result.data:
@@ -379,21 +382,27 @@ async def get_admin_stats(admin: dict = Depends(require_admin)):
     Get admin dashboard statistics.
     """
     client = get_supabase_admin_client()
+    org_id = admin.get("org_id")
 
-    # Count documents by category
+    # Count documents by category for this org
     docs_by_category = {}
     for category in VALID_CATEGORIES:
-        result = client.table("documents").select("id", count="exact").eq("category", category).execute()
+        result = client.table("documents").select("id", count="exact").eq("org_id", org_id).eq("category", category).execute()
         docs_by_category[category] = result.count or 0
 
-    # Total documents
-    total_docs_result = client.table("documents").select("id", count="exact").execute()
+    # Total documents for this org
+    total_docs_result = client.table("documents").select("id", count="exact").eq("org_id", org_id).execute()
 
-    # Total chunks
-    total_chunks_result = client.table("document_chunks").select("id", count="exact").execute()
+    # Total chunks for this org's documents
+    org_doc_ids = client.table("documents").select("id").eq("org_id", org_id).execute()
+    doc_ids = [d["id"] for d in org_doc_ids.data] if org_doc_ids.data else []
+    total_chunks = 0
+    if doc_ids:
+        total_chunks_result = client.table("document_chunks").select("id", count="exact").in_("document_id", doc_ids).execute()
+        total_chunks = total_chunks_result.count or 0
 
-    # Calculate total storage size
-    docs_result = client.table("documents").select("filename").execute()
+    # Calculate total storage size for this org
+    docs_result = client.table("documents").select("filename").eq("org_id", org_id).execute()
     total_size = 0
     for doc in docs_result.data:
         file_path = os.path.join(settings.upload_directory, doc["filename"])
@@ -404,7 +413,7 @@ async def get_admin_stats(admin: dict = Depends(require_admin)):
 
     return AdminStats(
         total_documents=total_docs_result.count or 0,
-        total_chunks=total_chunks_result.count or 0,
+        total_chunks=total_chunks,
         documents_by_category=docs_by_category,
         total_size_mb=round(total_size_mb, 2)
     )
@@ -416,11 +425,12 @@ async def delete_document(doc_id: str, admin: dict = Depends(require_admin)):
     Delete a document and all its chunks.
     """
     from services import supabase_storage
-    
-    client = get_supabase_admin_client()
 
-    # Get document info
-    doc_result = client.table("documents").select("*").eq("id", doc_id).single().execute()
+    client = get_supabase_admin_client()
+    org_id = admin.get("org_id")
+
+    # Get document info - verify it belongs to this org
+    doc_result = client.table("documents").select("*").eq("id", doc_id).eq("org_id", org_id).single().execute()
 
     if not doc_result.data:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -458,10 +468,12 @@ async def rename_document(
     Rename a document file (both in Storage and DB).
     """
     from services import supabase_storage
-    
-    client = get_supabase_admin_client()
 
-    doc_result = client.table("documents").select("*").eq("id", doc_id).single().execute()
+    client = get_supabase_admin_client()
+    org_id = admin.get("org_id")
+
+    # Verify document belongs to this org
+    doc_result = client.table("documents").select("*").eq("id", doc_id).eq("org_id", org_id).single().execute()
 
     if not doc_result.data:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -526,9 +538,10 @@ async def update_document_metadata(
     Update document metadata (year, department, category).
     """
     client = get_supabase_admin_client()
+    org_id = admin.get("org_id")
 
-    # Verify document exists
-    doc_result = client.table("documents").select("id").eq("id", doc_id).single().execute()
+    # Verify document exists and belongs to this org
+    doc_result = client.table("documents").select("id").eq("id", doc_id).eq("org_id", org_id).single().execute()
 
     if not doc_result.data:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -543,12 +556,21 @@ async def update_document_metadata(
                 detail=f"Invalid category. Allowed: {', '.join(valid_category_slugs)}"
             )
 
-    valid_years = ['1', '2', '3', '4', 'all']
-    if request.year and request.year not in valid_years:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid year. Must be one of: {', '.join(valid_years)}"
-        )
+    # Validate years - can be single value or comma-separated list
+    if request.year:
+        # Get valid year codes from database
+        year_records = client.table("years").select("code").eq("org_id", org_id).execute()
+        valid_year_codes = {y["code"] for y in year_records.data} if year_records.data else set()
+        valid_year_codes.add("all")  # Always allow "all"
+
+        # Split by comma and validate each year
+        years_list = [y.strip() for y in request.year.split(',')]
+        invalid_years = [y for y in years_list if y not in valid_year_codes]
+        if invalid_years:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid year(s): {', '.join(invalid_years)}. Valid codes: {', '.join(sorted(valid_year_codes))}"
+            )
 
     try:
         updates = {}
@@ -629,17 +651,22 @@ async def clear_vector_store(
         )
     
     try:
-        # Also clear from Supabase Storage
+        # Also clear from Supabase Storage - ONLY for this org
         from services import supabase_storage
         client = get_supabase_admin_client()
-        
-        # Get all documents with storage paths
-        docs = client.table("documents").select("storage_path").execute()
+        org_id = admin.get("org_id")
+
+        # Get all documents with storage paths for this org
+        docs = client.table("documents").select("id, storage_path").eq("org_id", org_id).execute()
+        doc_ids = []
         for doc in docs.data:
+            doc_ids.append(doc["id"])
             if doc.get("storage_path"):
                 supabase_storage.delete_file(doc["storage_path"])
-        
-        vector_store.clear_all()
+
+        # Delete documents and chunks for this org only
+        if doc_ids:
+            client.table("documents").delete().in_("id", doc_ids).execute()
 
         return {
             "message": "Vector store cleared successfully",
@@ -657,15 +684,16 @@ async def health_check(admin: dict = Depends(require_admin)):
     Reports orphaned files (in Storage but not DB) and missing files (in DB but not Storage).
     """
     from services import supabase_storage
-    
+
     client = get_supabase_admin_client()
-    
+    org_id = admin.get("org_id")
+
     # Get all files from Storage
     storage_files = supabase_storage.list_all_files()
     storage_paths = {f["storage_path"] for f in storage_files}
-    
-    # Get all documents from DB
-    db_result = client.table("documents").select("id, filename, storage_path, status, category").execute()
+
+    # Get all documents from DB for this org
+    db_result = client.table("documents").select("id, filename, storage_path, status, category").eq("org_id", org_id).execute()
     db_docs = db_result.data or []
     db_storage_paths = {doc.get("storage_path") for doc in db_docs if doc.get("storage_path")}
     

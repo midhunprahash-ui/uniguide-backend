@@ -17,10 +17,10 @@ class OrganizationResponse(BaseModel):
     id: str
     name: str
     slug: str
-    logo_url: Optional[str]
-    primary_color: str
-    secondary_color: str
-    settings: dict
+    logo_url: Optional[str] = None
+    primary_color: Optional[str] = "#000000"  # Default if null
+    secondary_color: Optional[str] = "#ffffff"  # Default if null
+    settings: Optional[dict] = None
 
 
 @router.get("/current", response_model=OrganizationResponse)
