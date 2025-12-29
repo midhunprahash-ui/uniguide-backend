@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
-from routes import admin, chat, circular, categories, departments, organizations
+from routes import admin, chat, circular, categories, departments, organizations, streams, years
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -46,6 +46,8 @@ app.include_router(circular.router, prefix="/api/circular", tags=["Circular"])
 app.include_router(categories.router, prefix="/api/categories", tags=["Categories"])
 app.include_router(departments.router, prefix="/api/departments", tags=["Departments"])
 app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])
+app.include_router(streams.router, prefix="/api/streams", tags=["Streams"])
+app.include_router(years.router, prefix="/api/years", tags=["Years"])
 
 
 @app.on_event("startup")
