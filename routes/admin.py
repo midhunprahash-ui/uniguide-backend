@@ -109,6 +109,27 @@ async def admin_login(credentials: AdminLogin):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
 
+@router.get("/validate-token")
+async def validate_token(admin: dict = Depends(require_admin)):
+    """
+    Validate the current token and return user info.
+    Used by frontend to verify authentication state.
+    
+    Returns:
+        valid: True if token is valid
+        user: User information (id, email, role)
+    """
+    return {
+        "valid": True,
+        "user": {
+            "id": admin.get("id"),
+            "email": admin.get("email"),
+            "role": admin.get("role", "admin")
+        }
+    }
+
+
+
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
