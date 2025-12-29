@@ -164,12 +164,16 @@ async def upload_document(
             detail=f"Unsupported file type. Allowed: {', '.join(allowed_extensions)}"
         )
 
-    # Validate category
-    valid_categories = ['rules', 'admissions', 'schedules', 'timetables', 'abhs', 'circulars']
-    if category not in valid_categories:
+    # Validate category against database
+    from services.supabase_client import get_supabase_admin_client
+    db_client = get_supabase_admin_client()
+    valid_cats = db_client.table("categories").select("slug").execute()
+    valid_category_slugs = [c["slug"] for c in valid_cats.data] if valid_cats.data else []
+    
+    if category not in valid_category_slugs:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid category. Allowed: {', '.join(valid_categories)}"
+            detail=f"Invalid category. Allowed: {', '.join(valid_category_slugs)}"
         )
 
     # Save file temporarily for processing
@@ -328,13 +332,18 @@ async def get_documents_for_category(
     """
     Get all documents for a specific category.
     """
-    if category not in VALID_CATEGORIES:
+    client = get_supabase_admin_client()
+    
+    # Validate category against database
+    valid_cats = client.table("categories").select("slug").execute()
+    valid_category_slugs = [c["slug"] for c in valid_cats.data] if valid_cats.data else []
+    
+    if category not in valid_category_slugs:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid category. Must be one of: {', '.join(VALID_CATEGORIES)}"
+            detail=f"Invalid category. Allowed: {', '.join(valid_category_slugs)}"
         )
 
-    client = get_supabase_admin_client()
     result = client.table("documents").select("*").eq("category", category).order("created_at", desc=True).execute()
 
     docs = []
@@ -514,12 +523,15 @@ async def update_document_metadata(
     if not doc_result.data:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Validate
-    if request.category and request.category not in VALID_CATEGORIES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid category. Must be one of: {', '.join(VALID_CATEGORIES)}"
-        )
+    # Validate category against database if provided
+    if request.category:
+        valid_cats = client.table("categories").select("slug").execute()
+        valid_category_slugs = [c["slug"] for c in valid_cats.data] if valid_cats.data else []
+        if request.category not in valid_category_slugs:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid category. Allowed: {', '.join(valid_category_slugs)}"
+            )
 
     valid_years = ['1', '2', '3', '4', 'all']
     if request.year and request.year not in valid_years:
