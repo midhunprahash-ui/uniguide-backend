@@ -15,9 +15,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def register_circular(doc_id: str, filename: str, year: str, department: str,
-                      upload_date: str, one_line_summary: str = None,
-                      brief_summary: str = None, chunk_count: int = 0):
+def register_circular(
+    doc_id: str,
+    filename: str,
+    year: str,
+    department: str,
+    upload_date: str,
+    one_line_summary: str = None,
+    brief_summary: str = None,
+    chunk_count: int = 0,
+    org_id: str = None
+):
     """
     Register a circular in Supabase.
     This is called from admin routes when a circular is uploaded.
@@ -29,15 +37,21 @@ def register_circular(doc_id: str, filename: str, year: str, department: str,
         existing = client.table("circulars").select("id").eq("document_id", doc_id).execute()
 
         if not existing.data:
-            # Create new circular entry
-            client.table("circulars").insert({
+            # Create new circular entry with org_id for multi-tenant isolation
+            circular_data = {
                 "document_id": doc_id,
                 "title": filename,
                 "one_line_summary": one_line_summary,
                 "brief_summary": brief_summary,
                 "is_active": True
-            }).execute()
-            logger.info(f"Registered circular: {filename}")
+            }
+
+            # Add org_id if provided
+            if org_id:
+                circular_data["org_id"] = org_id
+
+            client.table("circulars").insert(circular_data).execute()
+            logger.info(f"Registered circular: {filename} for org: {org_id}")
     except Exception as e:
         logger.error(f"Error registering circular: {e}")
 

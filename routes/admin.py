@@ -241,7 +241,7 @@ async def upload_document(
         # Update document record with storage path and FK IDs
         client = get_supabase_admin_client()
         org_id = admin.get("org_id")
-        doc_result = client.table("documents").select("id").eq("filename", file.filename).eq("org_id", org_id).maybeSingle().execute()
+        doc_result = client.table("documents").select("id").eq("filename", file.filename).eq("org_id", org_id).maybe_single().execute()
         if doc_result.data:
             document_id = doc_result.data["id"]
             
@@ -252,7 +252,7 @@ async def upload_document(
             
             # Resolve stream_id from code
             if not resolved_stream_id and stream and stream != 'all' and ',' not in stream:
-                stream_result = client.table("streams").select("id").eq("code", stream).eq("org_id", org_id).maybeSingle().execute()
+                stream_result = client.table("streams").select("id").eq("code", stream).eq("org_id", org_id).maybe_single().execute()
                 if stream_result.data:
                     resolved_stream_id = stream_result.data["id"]
             
@@ -261,13 +261,13 @@ async def upload_document(
                 dept_query = client.table("departments").select("id").eq("code", department).eq("org_id", org_id)
                 if resolved_stream_id:
                     dept_query = dept_query.eq("stream_id", resolved_stream_id)
-                dept_result = dept_query.maybeSingle().execute()
+                dept_result = dept_query.maybe_single().execute()
                 if dept_result.data:
                     resolved_department_id = dept_result.data["id"]
             
             # Resolve year_id from code
             if not resolved_year_id and year and year != 'all' and ',' not in year and resolved_department_id:
-                year_result = client.table("years").select("id").eq("code", year).eq("department_id", resolved_department_id).maybeSingle().execute()
+                year_result = client.table("years").select("id").eq("code", year).eq("department_id", resolved_department_id).maybe_single().execute()
                 if year_result.data:
                     resolved_year_id = year_result.data["id"]
             
@@ -300,9 +300,10 @@ async def upload_document(
                     "brief_summary": summaries["brief"]
                 }).eq("id", document_id).execute()
 
-                # Create circular entry
+                # Create circular entry with org_id
                 client.table("circulars").insert({
                     "document_id": document_id,
+                    "org_id": org_id,  # Add org_id for multi-tenant isolation
                     "title": file.filename,
                     "one_line_summary": summaries["one_line"],
                     "brief_summary": summaries["brief"],
@@ -326,10 +327,12 @@ async def upload_document(
 @router.get("/documents", response_model=list[DocumentMetadata])
 async def list_documents(
     category: str | None = None,
+    include_deleted: bool = False,
     admin: dict = Depends(require_admin)
 ):
     """
     List all uploaded documents, optionally filtered by category.
+    Excludes soft-deleted documents by default.
     """
     client = get_supabase_admin_client()
 
@@ -337,6 +340,10 @@ async def list_documents(
     query = client.table("documents").select("*").eq("org_id", org_id)
     if category:
         query = query.eq("category", category)
+
+    # Exclude soft-deleted documents unless explicitly requested
+    if not include_deleted:
+        query = query.is_("deleted_at", "null")
 
     result = query.order("created_at", desc=True).execute()
 
@@ -376,8 +383,8 @@ async def get_documents_by_category(admin: dict = Depends(require_admin)):
     total_documents = 0
 
     for category in category_slugs:
-        # Filter documents by category AND org_id
-        query = client.table("documents").select("*").eq("category", category).order("created_at", desc=True)
+        # Filter documents by category AND org_id, exclude soft-deleted
+        query = client.table("documents").select("*").eq("category", category).is_("deleted_at", "null").order("created_at", desc=True)
         if admin_org_id:
             query = query.eq("org_id", admin_org_id)
         result = query.execute()
@@ -460,25 +467,25 @@ async def get_admin_stats(admin: dict = Depends(require_admin)):
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
 
-    # Count documents by category for this org
+    # Count documents by category for this org (exclude soft-deleted)
     docs_by_category = {}
     for category in VALID_CATEGORIES:
-        result = client.table("documents").select("id", count="exact").eq("org_id", org_id).eq("category", category).execute()
+        result = client.table("documents").select("id", count="exact").eq("org_id", org_id).eq("category", category).is_("deleted_at", "null").execute()
         docs_by_category[category] = result.count or 0
 
-    # Total documents for this org
-    total_docs_result = client.table("documents").select("id", count="exact").eq("org_id", org_id).execute()
+    # Total documents for this org (exclude soft-deleted)
+    total_docs_result = client.table("documents").select("id", count="exact").eq("org_id", org_id).is_("deleted_at", "null").execute()
 
-    # Total chunks for this org's documents
-    org_doc_ids = client.table("documents").select("id").eq("org_id", org_id).execute()
+    # Total chunks for this org's active documents only
+    org_doc_ids = client.table("documents").select("id").eq("org_id", org_id).is_("deleted_at", "null").execute()
     doc_ids = [d["id"] for d in org_doc_ids.data] if org_doc_ids.data else []
     total_chunks = 0
     if doc_ids:
         total_chunks_result = client.table("document_chunks").select("id", count="exact").in_("document_id", doc_ids).execute()
         total_chunks = total_chunks_result.count or 0
 
-    # Calculate total storage size for this org
-    docs_result = client.table("documents").select("filename").eq("org_id", org_id).execute()
+    # Calculate total storage size for this org (active documents only)
+    docs_result = client.table("documents").select("filename").eq("org_id", org_id).is_("deleted_at", "null").execute()
     total_size = 0
     for doc in docs_result.data:
         file_path = os.path.join(settings.upload_directory, doc["filename"])
@@ -496,14 +503,24 @@ async def get_admin_stats(admin: dict = Depends(require_admin)):
 
 
 @router.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str, admin: dict = Depends(require_admin)):
+async def delete_document(
+    doc_id: str,
+    hard_delete: bool = False,
+    admin: dict = Depends(require_admin)
+):
     """
-    Delete a document and all its chunks.
+    Delete a document (soft delete by default, hard delete with confirmation).
+
+    Args:
+        doc_id: Document ID to delete
+        hard_delete: If True, permanently deletes the document (requires superadmin)
     """
     from services import supabase_storage
+    from datetime import datetime
 
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
+    user_id = admin.get("id")
 
     # Get document info - verify it belongs to this org
     doc_result = client.table("documents").select("*").eq("id", doc_id).eq("org_id", org_id).single().execute()
@@ -514,24 +531,117 @@ async def delete_document(doc_id: str, admin: dict = Depends(require_admin)):
     doc_info = doc_result.data
 
     try:
-        # Delete from Supabase Storage if storage_path exists
-        storage_path = doc_info.get("storage_path")
-        if storage_path:
-            supabase_storage.delete_file(storage_path)
+        if hard_delete:
+            # Hard delete requires superadmin role
+            if admin.get("role") != "superadmin":
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only superadmins can permanently delete documents"
+                )
 
-        # Delete from Supabase database (chunks cascade automatically)
-        client.table("documents").delete().eq("id", doc_id).execute()
+            # Delete from Supabase Storage if storage_path exists
+            storage_path = doc_info.get("storage_path")
+            if storage_path:
+                supabase_storage.delete_file(storage_path)
 
-        # Delete local file if exists (legacy cleanup)
-        file_path = os.path.join(settings.upload_directory, doc_info["filename"])
-        if os.path.exists(file_path):
-            os.remove(file_path)
+            # Delete from Supabase database (chunks cascade automatically)
+            client.table("documents").delete().eq("id", doc_id).execute()
 
-        return {"message": "Document deleted successfully", "filename": doc_info["filename"]}
+            # Delete local file if exists (legacy cleanup)
+            file_path = os.path.join(settings.upload_directory, doc_info["filename"])
+            if os.path.exists(file_path):
+                os.remove(file_path)
 
+            return {
+                "message": "Document permanently deleted",
+                "filename": doc_info["filename"],
+                "hard_delete": True
+            }
+        else:
+            # Soft delete - just mark as deleted
+            client.table("documents").update({
+                "deleted_at": datetime.now().isoformat(),
+                "deleted_by": user_id
+            }).eq("id", doc_id).execute()
+
+            return {
+                "message": "Document deleted (can be restored)",
+                "filename": doc_info["filename"],
+                "hard_delete": False
+            }
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error deleting document: {e}")
         raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
+
+
+@router.post("/documents/{doc_id}/restore")
+async def restore_document(doc_id: str, admin: dict = Depends(require_admin)):
+    """
+    Restore a soft-deleted document.
+    """
+    client = get_supabase_admin_client()
+    org_id = admin.get("org_id")
+
+    # Get document - including soft-deleted ones
+    doc_result = client.table("documents").select("*").eq("id", doc_id).eq("org_id", org_id).single().execute()
+
+    if not doc_result.data:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if not doc_result.data.get("deleted_at"):
+        raise HTTPException(status_code=400, detail="Document is not deleted")
+
+    try:
+        # Restore the document
+        client.table("documents").update({
+            "deleted_at": None,
+            "deleted_by": None
+        }).eq("id", doc_id).execute()
+
+        return {
+            "message": "Document restored successfully",
+            "filename": doc_result.data["filename"]
+        }
+
+    except Exception as e:
+        logger.error(f"Error restoring document: {e}")
+        raise HTTPException(status_code=500, detail=f"Error restoring document: {str(e)}")
+
+
+@router.get("/documents/deleted")
+async def list_deleted_documents(admin: dict = Depends(require_admin)):
+    """
+    List all soft-deleted documents for recovery.
+    """
+    client = get_supabase_admin_client()
+    org_id = admin.get("org_id")
+
+    result = client.table("documents").select(
+        "id, filename, category, year, department, deleted_at, deleted_by"
+    ).eq("org_id", org_id).not_.is_("deleted_at", "null").order("deleted_at", desc=True).execute()
+
+    # Get deleter names
+    docs = []
+    for doc in result.data:
+        deleter_name = None
+        if doc.get("deleted_by"):
+            profile = client.table("profiles").select("full_name").eq("id", doc["deleted_by"]).maybe_single().execute()
+            deleter_name = profile.data.get("full_name") if profile.data else None
+
+        docs.append({
+            "id": doc["id"],
+            "filename": doc["filename"],
+            "category": doc["category"],
+            "year": doc["year"],
+            "department": doc["department"],
+            "deleted_at": doc["deleted_at"],
+            "deleted_by_name": deleter_name
+        })
+
+    return docs
 
 
 @router.put("/documents/{doc_id}/rename")
@@ -696,7 +806,7 @@ async def update_document_metadata(
         
         # Resolve stream_id
         if stream_val and stream_val != 'all' and ',' not in stream_val:
-            stream_result = client.table("streams").select("id").eq("code", stream_val).eq("org_id", org_id).maybeSingle().execute()
+            stream_result = client.table("streams").select("id").eq("code", stream_val).eq("org_id", org_id).maybe_single().execute()
             if stream_result.data:
                 updates["stream_id"] = stream_result.data["id"]
         elif stream_val == 'all':
@@ -707,7 +817,7 @@ async def update_document_metadata(
             dept_query = client.table("departments").select("id").eq("code", dept_val).eq("org_id", org_id)
             if "stream_id" in updates and updates["stream_id"]:
                 dept_query = dept_query.eq("stream_id", updates["stream_id"])
-            dept_result = dept_query.maybeSingle().execute()
+            dept_result = dept_query.maybe_single().execute()
             if dept_result.data:
                 updates["department_id"] = dept_result.data["id"]
         elif dept_val == 'all':
@@ -716,7 +826,7 @@ async def update_document_metadata(
         # Resolve year_id
         if year_val and year_val != 'all' and ',' not in year_val:
             if "department_id" in updates and updates["department_id"]:
-                year_result = client.table("years").select("id").eq("code", year_val).eq("department_id", updates["department_id"]).maybeSingle().execute()
+                year_result = client.table("years").select("id").eq("code", year_val).eq("department_id", updates["department_id"]).maybe_single().execute()
                 if year_result.data:
                     updates["year_id"] = year_result.data["id"]
         elif year_val == 'all':

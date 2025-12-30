@@ -29,23 +29,43 @@ class SupabaseChatSessionManager:
         self,
         category: str = "rules",
         year: str = "all",
-        department: str = "all"
+        department: str = "all",
+        org_id: str = None,
+        user_id: str = None
     ) -> str:
-        """Create a new chat session and return its ID."""
+        """Create a new chat session and return its ID.
+
+        Args:
+            category: Chat category filter
+            year: Year filter
+            department: Department filter
+            org_id: Organization ID for multi-tenant isolation (required for proper isolation)
+            user_id: User ID (None for anonymous sessions)
+        """
         session_id = str(uuid.uuid4())
-        
+
+        # If no org_id provided, get default org
+        if not org_id:
+            try:
+                org = self.client.table("organizations").select("id").eq("slug", "sjit").limit(1).execute()
+                org_id = org.data[0]["id"] if org.data else None
+            except Exception:
+                pass
+
         try:
             self.client.table("chat_sessions").insert({
                 "id": session_id,
+                "org_id": org_id,
+                "user_id": user_id,
                 "category": category,
                 "year": year,
                 "department": department,
                 "updated_at": datetime.now().isoformat()
             }).execute()
-            
-            logger.info(f"Created new chat session: {session_id}")
+
+            logger.info(f"Created new chat session: {session_id} for org: {org_id}")
             return session_id
-            
+
         except Exception as e:
             logger.error(f"Error creating session: {e}")
             # Fallback to UUID for now
