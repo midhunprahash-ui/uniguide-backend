@@ -47,6 +47,7 @@ def get_document_registry() -> dict:
         registry[doc["id"]] = {
             "id": doc["id"],
             "filename": doc["filename"],
+            "stream": doc.get("stream", "all"),
             "year": doc["year"],
             "department": doc["department"],
             "category": doc["category"],
@@ -286,6 +287,7 @@ async def list_documents(
         docs.append({
             "id": doc["id"],
             "filename": doc["filename"],
+            "stream": doc.get("stream", "all"),
             "year": doc["year"],
             "department": doc["department"],
             "category": doc["category"],
@@ -325,6 +327,7 @@ async def get_documents_by_category(admin: dict = Depends(require_admin)):
             category_docs.append({
                 "id": doc["id"],
                 "filename": doc["filename"],
+                "stream": doc.get("stream", "all"),
                 "year": doc["year"],
                 "department": doc["department"],
                 "category": doc["category"],
@@ -376,6 +379,7 @@ async def get_documents_for_category(
         docs.append({
             "id": doc["id"],
             "filename": doc["filename"],
+            "stream": doc.get("stream", "all"),
             "year": doc["year"],
             "department": doc["department"],
             "category": doc["category"],
