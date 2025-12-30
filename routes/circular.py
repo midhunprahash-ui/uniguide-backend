@@ -69,10 +69,10 @@ def get_latest_circular(org_id: str = None):
         if not org_id:
             return None
 
-        # First, get document IDs for this org's circulars category
+        # First, get document IDs for this org's circulars category (exclude soft-deleted)
         docs = client.table("documents").select("id").eq(
             "org_id", org_id
-        ).eq("category", "circulars").execute()
+        ).eq("category", "circulars").is_("deleted_at", "null").execute()
 
         if not docs.data:
             return None
@@ -108,7 +108,7 @@ def get_latest_circular(org_id: str = None):
         # This handles documents uploaded before circular registration was implemented
         doc_result = client.table("documents").select("*").eq(
             "org_id", org_id
-        ).eq("category", "circulars").order(
+        ).eq("category", "circulars").is_("deleted_at", "null").order(
             "created_at", desc=True
         ).limit(1).execute()
 
