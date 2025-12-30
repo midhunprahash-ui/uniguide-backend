@@ -136,6 +136,8 @@ async def upload_document(
     year: str = Form(...),
     department: str = Form(...),
     category: str = Form(...),
+    stream: str = Form("all"),
+    semester: str = Form("all"),
     summary: str | None = Form(None),
     admin: dict = Depends(require_admin)
 ):
@@ -144,9 +146,11 @@ async def upload_document(
 
     Args:
         file: Document file (PDF, image, or text)
-        year: Year filter (e.g., "1", "2", "3", "4", "all")
-        department: Department filter (e.g., "CSE", "ECE", "all")
+        year: Year filter (e.g., "1", "2", "3", "4", "all" or comma-separated like "1,2,3")
+        department: Department filter (e.g., "CSE", "ECE", "all" or comma-separated like "CSE,ECE")
         category: Category (rules, admissions, schedules, abhs, circulars)
+        stream: Stream filter (e.g., "UG", "PG", "all" or comma-separated like "UG,PG")
+        semester: Semester filter (e.g., "1", "2", "all" or comma-separated like "1,2,3")
         summary: Optional summary for circulars
 
     Returns:
@@ -169,12 +173,16 @@ async def upload_document(
     db_client = get_supabase_admin_client()
     valid_cats = db_client.table("categories").select("slug").execute()
     valid_category_slugs = [c["slug"] for c in valid_cats.data] if valid_cats.data else []
-    
+
     if category not in valid_category_slugs:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid category. Allowed: {', '.join(valid_category_slugs)}"
         )
+
+    # Note: Stream is now derived from selected departments by the frontend
+    # The stream parameter reflects which streams the selected departments belong to
+    # No additional validation needed here as frontend handles the logic
 
     # Save file temporarily for processing
     os.makedirs(settings.upload_directory, exist_ok=True)
@@ -192,7 +200,9 @@ async def upload_document(
             department=department,
             category=category,
             file_type=file_ext,
-            org_id=admin.get("org_id")
+            org_id=admin.get("org_id"),
+            stream=stream,
+            semester=semester
         )
 
         # Upload file to Supabase Storage for permanent storage
@@ -535,7 +545,7 @@ async def update_document_metadata(
     admin: dict = Depends(require_admin)
 ):
     """
-    Update document metadata (year, department, category).
+    Update document metadata (year, department, category, stream, semester).
     """
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
@@ -572,6 +582,31 @@ async def update_document_metadata(
                 detail=f"Invalid year(s): {', '.join(invalid_years)}. Valid codes: {', '.join(sorted(valid_year_codes))}"
             )
 
+    # Validate streams - can be single value or comma-separated list
+    if request.stream:
+        stream_records = client.table("streams").select("code").eq("org_id", org_id).execute()
+        valid_stream_codes = {s["code"] for s in stream_records.data} if stream_records.data else set()
+        valid_stream_codes.add("all")  # Always allow "all"
+
+        streams_list = [s.strip() for s in request.stream.split(',')]
+        invalid_streams = [s for s in streams_list if s not in valid_stream_codes]
+        if invalid_streams:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid stream(s): {', '.join(invalid_streams)}. Valid codes: {', '.join(sorted(valid_stream_codes))}"
+            )
+
+    # Validate semesters - can be single value or comma-separated list (1-8 typically)
+    if request.semester and request.semester != "all":
+        semesters_list = [s.strip() for s in request.semester.split(',')]
+        # Semesters are numeric values, validate they are valid numbers
+        for sem in semesters_list:
+            if sem != "all" and not sem.isdigit():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid semester: {sem}. Semesters must be numeric values or 'all'."
+                )
+
     try:
         updates = {}
         if request.year is not None:
@@ -580,6 +615,10 @@ async def update_document_metadata(
             updates["department"] = request.department
         if request.category is not None:
             updates["category"] = request.category
+        if request.stream is not None:
+            updates["stream"] = request.stream
+        if request.semester is not None:
+            updates["semester"] = request.semester
 
         if not updates:
             return {"message": "No updates provided"}

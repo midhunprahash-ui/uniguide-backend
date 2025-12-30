@@ -37,7 +37,9 @@ class SupabaseVectorStore:
         mime_type: str | None = None,
         summaries: dict | None = None,
         uploaded_by: str | None = None,
-        org_id: str | None = None
+        org_id: str | None = None,
+        stream: str = "all",
+        semester: str = "all"
     ) -> str:
         """
         Add a document and its chunks to the vector store.
@@ -55,6 +57,8 @@ class SupabaseVectorStore:
             summaries: Optional dict with 'one_line' and 'brief' keys
             uploaded_by: Optional user ID who uploaded
             org_id: Optional organization ID for multi-tenant isolation
+            stream: Stream filter value (e.g., 'UG', 'PG', 'all')
+            semester: Semester filter value (e.g., '1', '2', 'all')
 
         Returns:
             Document ID
@@ -67,6 +71,8 @@ class SupabaseVectorStore:
             "year": year,
             "department": department,
             "category": category,
+            "stream": stream,
+            "semester": semester,
             "file_size_bytes": file_size_bytes,
             "mime_type": mime_type,
             "one_line_summary": summaries.get("one_line") if summaries else None,
@@ -147,6 +153,8 @@ class SupabaseVectorStore:
                     "year": meta.get("year", "all"),
                     "department": meta.get("department", "all"),
                     "category": meta.get("category", "General"),
+                    "stream": meta.get("stream", "all"),
+                    "semester": meta.get("semester", "all"),
                     "org_id": meta.get("org_id"),
                 }
                 doc_result = self.client.table("documents").insert(doc_data).execute()
@@ -189,6 +197,8 @@ class SupabaseVectorStore:
         filter_department = None
         filter_category = None
         filter_org_id = None
+        filter_stream = None
+        filter_semester = None
 
         if where:
             # Handle $and operator
@@ -213,12 +223,18 @@ class SupabaseVectorStore:
                                 filter_department = value
                         elif key == "org_id":
                             filter_org_id = value
+                        elif key == "stream":
+                            filter_stream = value
+                        elif key == "semester":
+                            filter_semester = value
             else:
                 # Simple key-value filters
                 filter_year = where.get("year")
                 filter_department = where.get("department")
                 filter_category = where.get("category")
                 filter_org_id = where.get("org_id")
+                filter_stream = where.get("stream")
+                filter_semester = where.get("semester")
 
                 # Handle $in for simple filters too
                 if isinstance(filter_year, dict) and "$in" in filter_year:
@@ -238,7 +254,9 @@ class SupabaseVectorStore:
                 "filter_year": filter_year,
                 "filter_department": filter_department,
                 "filter_category": filter_category,
-                "filter_org_id": filter_org_id
+                "filter_org_id": filter_org_id,
+                "filter_stream": filter_stream,
+                "filter_semester": filter_semester
             }
         ).execute()
 
@@ -326,7 +344,9 @@ class SupabaseVectorStore:
         year: str | None = None,
         department: str | None = None,
         category: str | None = None,
-        filename: str | None = None
+        filename: str | None = None,
+        stream: str | None = None,
+        semester: str | None = None
     ) -> dict | None:
         """Update document metadata."""
         update_data = {}
@@ -339,6 +359,10 @@ class SupabaseVectorStore:
         if filename is not None:
             update_data["filename"] = filename
             update_data["original_filename"] = filename
+        if stream is not None:
+            update_data["stream"] = stream
+        if semester is not None:
+            update_data["semester"] = semester
 
         if not update_data:
             return None

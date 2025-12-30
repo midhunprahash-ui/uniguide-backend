@@ -146,7 +146,9 @@ Extract everything now:"""
         department: str,
         category: str,
         file_type: str,
-        org_id: str | None = None
+        org_id: str | None = None,
+        stream: str = "all",
+        semester: str = "all"
     ) -> dict:
         """Process document and store in vector database."""
         # Extract text based on file type
@@ -182,6 +184,8 @@ Extract everything now:"""
                 "year": year,
                 "department": department,
                 "category": category,
+                "stream": stream,
+                "semester": semester,
                 "source_file": filename,
                 "chunk_id": i,
                 "doc_id": doc_id,
@@ -205,6 +209,8 @@ Extract everything now:"""
             "year": year,
             "department": department,
             "category": category,
+            "stream": stream,
+            "semester": semester,
             "extracted_text": text  # Include for circular summary generation
         }
 

@@ -87,4 +87,6 @@ class UpdateDocumentRequest(BaseModel):
     year: Optional[str] = None
     department: Optional[str] = None
     category: Optional[str] = None
+    stream: Optional[str] = None
+    semester: Optional[str] = None
 

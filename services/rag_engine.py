@@ -145,27 +145,31 @@ class RAGEngine:
              print("WARNING: No category provided, defaulting to 'rules'")
              conditions.append({"category": "rules"})
 
-        # Handle hierarchy filtering: Stream -> Department -> Year
-        # Department filter
-        if department and department.lower() != "all":
-            conditions.append({"department": {"$in": [department, "all"]}})
+        # CRITICAL: Stream filter - prevents data leakage between streams (UG/PG)
+        # This filter is passed directly to match_documents SQL function which handles the logic:
+        # - If stream="all", only show documents with stream="all"
+        # - If stream="UG", show documents with stream="UG" or stream="all"
+        if stream:
+            conditions.append({"stream": stream})
 
-        # Year filter with cascade logic
-        if year and year.lower() != "all":
-            # Specific year selected - use that year
-            conditions.append({"year": {"$in": [year, "all"]}})
-        elif department and department.lower() != "all":
-            # No specific year but department selected - filter by all years in that department
-            dept_year_codes = self.get_year_codes_for_department(department)
-            if dept_year_codes:
-                # Include "all" to match documents that apply to all years
-                conditions.append({"year": {"$in": dept_year_codes + ["all"]}})
-        elif stream and stream.lower() != "all":
-            # No specific year or department but stream selected - filter by all years in all departments of that stream
-            stream_year_codes = self.get_year_codes_for_stream(stream)
-            if stream_year_codes:
-                # Include "all" to match documents that apply to all years
-                conditions.append({"year": {"$in": stream_year_codes + ["all"]}})
+        # Handle hierarchy filtering: Stream -> Department -> Year
+        # Department filter - ALWAYS add the filter (including 'all' for strict filtering)
+        if department:
+            if department.lower() != "all":
+                # Specific department: show docs for that dept OR docs with dept="all"
+                conditions.append({"department": {"$in": [department, "all"]}})
+            else:
+                # department="all": only show docs with dept="all" (strict filtering)
+                conditions.append({"department": "all"})
+
+        # Year filter - ALWAYS add the filter (including 'all' for strict filtering)
+        if year:
+            if year.lower() != "all":
+                # Specific year selected - show docs for that year OR docs with year="all"
+                conditions.append({"year": {"$in": [year, "all"]}})
+            else:
+                # year="all": only show docs with year="all" (strict filtering)
+                conditions.append({"year": "all"})
 
         # Combine conditions with $and if we have multiple
         if len(conditions) == 1:
