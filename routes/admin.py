@@ -5,8 +5,20 @@ Updated to use Supabase for document storage and auth.
 import logging
 import os
 import shutil
+import uuid as uuid_module
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+
+
+def is_valid_uuid(val: str | None) -> bool:
+    """Check if a string is a valid UUID."""
+    if not val:
+        return False
+    try:
+        uuid_module.UUID(val)
+        return True
+    except (ValueError, TypeError):
+        return False
 
 from config import get_settings
 from models.schemas import (
@@ -152,16 +164,25 @@ async def upload_document(
     Args:
         file: Document file (PDF, image, or text)
         year: Year filter (e.g., "1", "2", "3", "4", "all" or comma-separated like "1,2,3")
-        department: Department filter (e.g., "CSE", "ECE", "all" or comma-separated like "CSE,ECE")
+        department: Department filter (e.g., "CSE", "ECE", "all" or comma-separated)
         category: Category (rules, admissions, schedules, abhs, circulars)
-        stream: Stream filter (e.g., "UG", "PG", "all" or comma-separated like "UG,PG")
-        semester: Semester filter (e.g., "1", "2", "all" or comma-separated like "1,2,3")
+        stream: Stream filter (e.g., "UG", "PG", "all" or comma-separated)
+        semester: Semester filter (e.g., "1", "2", "all" or comma-separated)
         summary: Optional summary for circulars
 
     Returns:
         Document metadata
     """
     from services import supabase_storage
+    
+    # Validate FK IDs - if not valid UUIDs, set to None to trigger code-based resolution
+    if not is_valid_uuid(stream_id):
+        stream_id = None
+    if not is_valid_uuid(department_id):
+        department_id = None
+    if not is_valid_uuid(year_id):
+        year_id = None
+
     
     # Validate file type
     allowed_extensions = ['pdf', 'png', 'jpg', 'jpeg', 'txt']
@@ -220,7 +241,7 @@ async def upload_document(
         # Update document record with storage path and FK IDs
         client = get_supabase_admin_client()
         org_id = admin.get("org_id")
-        doc_result = client.table("documents").select("id").eq("filename", file.filename).eq("org_id", org_id).single().execute()
+        doc_result = client.table("documents").select("id").eq("filename", file.filename).eq("org_id", org_id).maybeSingle().execute()
         if doc_result.data:
             document_id = doc_result.data["id"]
             
@@ -230,23 +251,23 @@ async def upload_document(
             resolved_year_id = year_id
             
             # Resolve stream_id from code
-            if not resolved_stream_id and stream and stream != 'all':
-                stream_result = client.table("streams").select("id").eq("code", stream).eq("org_id", org_id).single().execute()
+            if not resolved_stream_id and stream and stream != 'all' and ',' not in stream:
+                stream_result = client.table("streams").select("id").eq("code", stream).eq("org_id", org_id).maybeSingle().execute()
                 if stream_result.data:
                     resolved_stream_id = stream_result.data["id"]
             
             # Resolve department_id from code
-            if not resolved_department_id and department and department != 'all':
+            if not resolved_department_id and department and department != 'all' and ',' not in department:
                 dept_query = client.table("departments").select("id").eq("code", department).eq("org_id", org_id)
                 if resolved_stream_id:
                     dept_query = dept_query.eq("stream_id", resolved_stream_id)
-                dept_result = dept_query.single().execute()
+                dept_result = dept_query.maybeSingle().execute()
                 if dept_result.data:
                     resolved_department_id = dept_result.data["id"]
             
             # Resolve year_id from code
-            if not resolved_year_id and year and year != 'all' and resolved_department_id:
-                year_result = client.table("years").select("id").eq("code", year).eq("department_id", resolved_department_id).single().execute()
+            if not resolved_year_id and year and year != 'all' and ',' not in year and resolved_department_id:
+                year_result = client.table("years").select("id").eq("code", year).eq("department_id", resolved_department_id).maybeSingle().execute()
                 if year_result.data:
                     resolved_year_id = year_result.data["id"]
             
