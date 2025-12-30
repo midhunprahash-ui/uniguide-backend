@@ -39,7 +39,11 @@ class SupabaseVectorStore:
         uploaded_by: str | None = None,
         org_id: str | None = None,
         stream: str = "all",
-        semester: str = "all"
+        semester: str = "all",
+        # FK-based hierarchy IDs (preferred over TEXT codes)
+        stream_id: str | None = None,
+        department_id: str | None = None,
+        year_id: str | None = None
     ) -> str:
         """
         Add a document and its chunks to the vector store.
@@ -78,7 +82,11 @@ class SupabaseVectorStore:
             "one_line_summary": summaries.get("one_line") if summaries else None,
             "brief_summary": summaries.get("brief") if summaries else None,
             "uploaded_by": uploaded_by,
-            "org_id": org_id
+            "org_id": org_id,
+            # FK-based hierarchy IDs (for referential integrity)
+            "stream_id": stream_id,
+            "department_id": department_id,
+            "year_id": year_id
         }
 
         doc_result = self.client.table("documents").insert(doc_data).execute()

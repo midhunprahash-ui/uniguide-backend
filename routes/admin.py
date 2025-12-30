@@ -140,6 +140,10 @@ async def upload_document(
     stream: str = Form("all"),
     semester: str = Form("all"),
     summary: str | None = Form(None),
+    # FK-based IDs (optional, will be looked up from codes if not provided)
+    stream_id: str | None = Form(None),
+    department_id: str | None = Form(None),
+    year_id: str | None = Form(None),
     admin: dict = Depends(require_admin)
 ):
     """
@@ -213,16 +217,53 @@ async def upload_document(
             filename=file.filename
         )
 
-        # Update document record with storage path
+        # Update document record with storage path and FK IDs
         client = get_supabase_admin_client()
         org_id = admin.get("org_id")
         doc_result = client.table("documents").select("id").eq("filename", file.filename).eq("org_id", org_id).single().execute()
         if doc_result.data:
             document_id = doc_result.data["id"]
-            client.table("documents").update({
-                "storage_path": storage_path
-            }).eq("id", document_id).execute()
+            
+            # Look up FK IDs from TEXT codes if not provided
+            resolved_stream_id = stream_id
+            resolved_department_id = department_id
+            resolved_year_id = year_id
+            
+            # Resolve stream_id from code
+            if not resolved_stream_id and stream and stream != 'all':
+                stream_result = client.table("streams").select("id").eq("code", stream).eq("org_id", org_id).single().execute()
+                if stream_result.data:
+                    resolved_stream_id = stream_result.data["id"]
+            
+            # Resolve department_id from code
+            if not resolved_department_id and department and department != 'all':
+                dept_query = client.table("departments").select("id").eq("code", department).eq("org_id", org_id)
+                if resolved_stream_id:
+                    dept_query = dept_query.eq("stream_id", resolved_stream_id)
+                dept_result = dept_query.single().execute()
+                if dept_result.data:
+                    resolved_department_id = dept_result.data["id"]
+            
+            # Resolve year_id from code
+            if not resolved_year_id and year and year != 'all' and resolved_department_id:
+                year_result = client.table("years").select("id").eq("code", year).eq("department_id", resolved_department_id).single().execute()
+                if year_result.data:
+                    resolved_year_id = year_result.data["id"]
+            
+            # Update document with storage path and FK IDs
+            update_data = {"storage_path": storage_path}
+            if resolved_stream_id:
+                update_data["stream_id"] = resolved_stream_id
+            if resolved_department_id:
+                update_data["department_id"] = resolved_department_id
+            if resolved_year_id:
+                update_data["year_id"] = resolved_year_id
+                
+            client.table("documents").update(update_data).eq("id", document_id).execute()
             result["storage_path"] = storage_path
+            result["stream_id"] = resolved_stream_id
+            result["department_id"] = resolved_department_id
+            result["year_id"] = resolved_year_id
 
         # If it's a circular, generate summary and register it
         if category == "circulars":
@@ -626,6 +667,39 @@ async def update_document_metadata(
 
         if not updates:
             return {"message": "No updates provided"}
+
+        # Resolve FK IDs from updated TEXT codes
+        stream_val = request.stream if request.stream else None
+        dept_val = request.department if request.department else None
+        year_val = request.year if request.year else None
+        
+        # Resolve stream_id
+        if stream_val and stream_val != 'all' and ',' not in stream_val:
+            stream_result = client.table("streams").select("id").eq("code", stream_val).eq("org_id", org_id).maybeSingle().execute()
+            if stream_result.data:
+                updates["stream_id"] = stream_result.data["id"]
+        elif stream_val == 'all':
+            updates["stream_id"] = None
+            
+        # Resolve department_id 
+        if dept_val and dept_val != 'all' and ',' not in dept_val:
+            dept_query = client.table("departments").select("id").eq("code", dept_val).eq("org_id", org_id)
+            if "stream_id" in updates and updates["stream_id"]:
+                dept_query = dept_query.eq("stream_id", updates["stream_id"])
+            dept_result = dept_query.maybeSingle().execute()
+            if dept_result.data:
+                updates["department_id"] = dept_result.data["id"]
+        elif dept_val == 'all':
+            updates["department_id"] = None
+            
+        # Resolve year_id
+        if year_val and year_val != 'all' and ',' not in year_val:
+            if "department_id" in updates and updates["department_id"]:
+                year_result = client.table("years").select("id").eq("code", year_val).eq("department_id", updates["department_id"]).maybeSingle().execute()
+                if year_result.data:
+                    updates["year_id"] = year_result.data["id"]
+        elif year_val == 'all':
+            updates["year_id"] = None
 
         client.table("documents").update(updates).eq("id", doc_id).execute()
 
