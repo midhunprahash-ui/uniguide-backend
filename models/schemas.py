@@ -37,6 +37,7 @@ class DocumentUpload(BaseModel):
 class DocumentMetadata(BaseModel):
     id: str
     filename: str
+    stream: str
     year: str
     department: str
     category: str
