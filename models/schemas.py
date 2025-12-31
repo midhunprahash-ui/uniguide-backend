@@ -12,6 +12,7 @@ class ChatQuery(BaseModel):
     department: str
     category: str = "schedules"  # rules, admissions, schedules, abhs, circulars
     session_id: Optional[str] = None
+    org_id: str  # REQUIRED: Organization ID for multi-tenant isolation
 
 class ChatResponse(BaseModel):
     answer: str

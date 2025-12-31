@@ -128,14 +128,26 @@ class RAGEngine:
         year: str,
         department: str,
         category: str,
+        org_id: str,
         n_results: int = 5
     ) -> tuple[list[str], list[str]]:
-        """Retrieve relevant context from vector store."""
+        """Retrieve relevant context from vector store.
+
+        Args:
+            org_id: REQUIRED - Organization ID for multi-tenant isolation.
+                    This ensures documents from one org cannot leak to another.
+        """
+        if not org_id:
+            raise ValueError("org_id is required for retrieve_context (tenant isolation)")
+
         query_embedding = self.generate_query_embedding(query)
 
         # Build metadata filter - Qdrant (via VectorStore) handles mapping
         where_filter = None
         conditions = []
+
+        # CRITICAL: org_id filter for multi-tenant isolation (ALWAYS FIRST)
+        conditions.append({"org_id": org_id})
 
         # Category filter (STRICTLY REQUIRED)
         if category:
@@ -436,11 +448,16 @@ Be specific about dates, events, or actions mentioned in the circular."""
         year: str,
         department: str,
         category: str,
+        org_id: str,
         conversation_history: list[dict[str, str]] = None
     ) -> dict[str, any]:
-        """Complete RAG pipeline: retrieve context and generate answer."""
+        """Complete RAG pipeline: retrieve context and generate answer.
+
+        Args:
+            org_id: REQUIRED - Organization ID for multi-tenant isolation.
+        """
         # Retrieve relevant context
-        context_chunks, sources = self.retrieve_context(question, stream, year, department, category)
+        context_chunks, sources = self.retrieve_context(question, stream, year, department, category, org_id)
 
         if not context_chunks:
             return {
@@ -649,13 +666,18 @@ Answer:"""
         year: str,
         department: str,
         category: str,
+        org_id: str,
         conversation_history: list[dict[str, str]] = None
     ):
-        """Complete RAG pipeline with streaming: retrieve context and stream answer."""
+        """Complete RAG pipeline with streaming: retrieve context and stream answer.
+
+        Args:
+            org_id: REQUIRED - Organization ID for multi-tenant isolation.
+        """
         import json
 
         # Retrieve relevant context
-        context_chunks, sources = self.retrieve_context(question, stream, year, department, category)
+        context_chunks, sources = self.retrieve_context(question, stream, year, department, category, org_id)
 
         # Deduplicate sources
         unique_sources = list(set(sources))

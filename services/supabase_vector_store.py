@@ -256,15 +256,13 @@ class SupabaseVectorStore:
                     vals = filter_department["$in"]
                     filter_department = next((v for v in vals if v != "all"), vals[0] if vals else None)
 
-        # CRITICAL: org_id is now REQUIRED for tenant isolation
-        # If no org_id provided, get default org
+        # CRITICAL: org_id is REQUIRED for tenant isolation - NO FALLBACKS!
+        # This prevents cross-tenant data leakage in RAG queries
         if not filter_org_id:
-            org = self.client.table("organizations").select("id").eq("slug", "sjit").limit(1).execute()
-            filter_org_id = org.data[0]["id"] if org.data else None
-            logger.warning("No org_id provided for vector search - using default org")
-
-        if not filter_org_id:
-            raise ValueError("org_id is required for vector search (tenant isolation)")
+            raise ValueError(
+                "org_id is required for vector search (tenant isolation). "
+                "This is a security requirement to prevent cross-tenant data leakage."
+            )
 
         # Call the optimized match_documents RPC function
         # Note: New signature has filter_org_id as second parameter (required)

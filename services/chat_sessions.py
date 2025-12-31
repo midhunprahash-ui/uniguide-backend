@@ -39,18 +39,14 @@ class SupabaseChatSessionManager:
             category: Chat category filter
             year: Year filter
             department: Department filter
-            org_id: Organization ID for multi-tenant isolation (required for proper isolation)
+            org_id: Organization ID for multi-tenant isolation (REQUIRED for proper isolation)
             user_id: User ID (None for anonymous sessions)
         """
         session_id = str(uuid.uuid4())
 
-        # If no org_id provided, get default org
+        # CRITICAL: org_id is REQUIRED for tenant isolation - NO FALLBACKS!
         if not org_id:
-            try:
-                org = self.client.table("organizations").select("id").eq("slug", "sjit").limit(1).execute()
-                org_id = org.data[0]["id"] if org.data else None
-            except Exception:
-                pass
+            logger.warning("No org_id provided for chat session - session will not be org-scoped")
 
         try:
             self.client.table("chat_sessions").insert({

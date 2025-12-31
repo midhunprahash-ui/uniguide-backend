@@ -36,7 +36,8 @@ async def query_chat_stream(query: ChatQuery):
             session_id = session_manager.create_session(
                 category=query.category,
                 year=query.year,
-                department=query.department
+                department=query.department,
+                org_id=query.org_id
             )
 
         # Store user question in session
@@ -65,6 +66,7 @@ async def query_chat_stream(query: ChatQuery):
                     year=query.year,
                     department=query.department,
                     category=query.category,
+                    org_id=query.org_id,
                     conversation_history=history
                 ):
                     # chunk_json is already a JSON string from rag_engine
@@ -114,7 +116,8 @@ async def query_chat(query: ChatQuery):
             session_id = session_manager.create_session(
                 category=query.category,
                 year=query.year,
-                department=query.department
+                department=query.department,
+                org_id=query.org_id
             )
 
         # Store user question in session
@@ -130,6 +133,7 @@ async def query_chat(query: ChatQuery):
             year=query.year,
             department=query.department,
             category=query.category,
+            org_id=query.org_id,
             conversation_history=history
         )
 
