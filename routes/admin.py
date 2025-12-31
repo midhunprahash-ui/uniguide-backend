@@ -208,12 +208,18 @@ async def upload_document(
 
     # Check for duplicate filename in active documents for this org
     org_id = admin.get("org_id")
-    existing_doc = db_client.table("documents").select("id, filename").eq("filename", file.filename).eq("org_id", org_id).maybe_single().execute()
-    if existing_doc.data:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Document '{file.filename}' already exists. Delete it first or rename your file."
-        )
+    try:
+        existing_doc = db_client.table("documents").select("id, filename").eq("filename", file.filename).eq("org_id", org_id).execute()
+        if existing_doc.data and len(existing_doc.data) > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Document '{file.filename}' already exists. Delete it first or rename your file."
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Log but don't block upload for query errors
+        logger.warning(f"Could not check for duplicate filename: {e}")
 
     # Note: Stream is now derived from selected departments by the frontend
     # The stream parameter reflects which streams the selected departments belong to
