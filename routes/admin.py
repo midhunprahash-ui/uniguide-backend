@@ -206,6 +206,15 @@ async def upload_document(
             detail=f"Invalid category. Allowed: {', '.join(valid_category_slugs)}"
         )
 
+    # Check for duplicate filename in active documents for this org
+    org_id = admin.get("org_id")
+    existing_doc = db_client.table("documents").select("id, filename").eq("filename", file.filename).eq("org_id", org_id).maybe_single().execute()
+    if existing_doc.data:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Document '{file.filename}' already exists. Delete it first or rename your file."
+        )
+
     # Note: Stream is now derived from selected departments by the frontend
     # The stream parameter reflects which streams the selected departments belong to
     # No additional validation needed here as frontend handles the logic
@@ -509,7 +518,9 @@ async def delete_document(
     admin: dict = Depends(require_admin)
 ):
     """
-    Delete a document (soft delete by default, hard delete with confirmation).
+    Delete a document.
+    - Default: Archives to deleted_documents table (can be restored)
+    - hard_delete=True: Permanently deletes including storage file (superadmin only)
 
     Args:
         doc_id: Document ID to delete
@@ -544,6 +555,9 @@ async def delete_document(
             if storage_path:
                 supabase_storage.delete_file(storage_path)
 
+            # Also remove from deleted_documents archive if exists
+            client.table("deleted_documents").delete().eq("id", doc_id).execute()
+
             # Delete from Supabase database (chunks cascade automatically)
             client.table("documents").delete().eq("id", doc_id).execute()
 
@@ -558,14 +572,40 @@ async def delete_document(
                 "hard_delete": True
             }
         else:
-            # Soft delete - just mark as deleted
-            client.table("documents").update({
+            # Archive delete - move to deleted_documents table
+            # 1. Insert into deleted_documents archive
+            archive_data = {
+                "id": doc_info["id"],
+                "filename": doc_info["filename"],
+                "original_filename": doc_info.get("original_filename"),
+                "file_path": doc_info.get("file_path"),
+                "storage_path": doc_info.get("storage_path"),
+                "file_size_bytes": doc_info.get("file_size_bytes"),
+                "mime_type": doc_info.get("mime_type"),
+                "year": doc_info.get("year"),
+                "department": doc_info.get("department"),
+                "category": doc_info.get("category"),
+                "stream": doc_info.get("stream"),
+                "semester": doc_info.get("semester"),
+                "one_line_summary": doc_info.get("one_line_summary"),
+                "brief_summary": doc_info.get("brief_summary"),
+                "org_id": doc_info["org_id"],
+                "stream_id": doc_info.get("stream_id"),
+                "department_id": doc_info.get("department_id"),
+                "year_id": doc_info.get("year_id"),
+                "uploaded_by": doc_info.get("uploaded_by"),
+                "created_at": doc_info.get("created_at"),
+                "updated_at": doc_info.get("updated_at"),
                 "deleted_at": datetime.now().isoformat(),
                 "deleted_by": user_id
-            }).eq("id", doc_id).execute()
+            }
+            client.table("deleted_documents").insert(archive_data).execute()
+
+            # 2. Delete from documents table (chunks cascade automatically)
+            client.table("documents").delete().eq("id", doc_id).execute()
 
             return {
-                "message": "Document deleted (can be restored)",
+                "message": "Document archived (can be restored)",
                 "filename": doc_info["filename"],
                 "hard_delete": False
             }
@@ -580,32 +620,94 @@ async def delete_document(
 @router.post("/documents/{doc_id}/restore")
 async def restore_document(doc_id: str, admin: dict = Depends(require_admin)):
     """
-    Restore a soft-deleted document.
+    Restore a document from the deleted_documents archive.
+    Moves the document back to the documents table and re-processes to regenerate chunks.
     """
+    from services.document_processor import document_processor
+    from services import supabase_storage
+
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
 
-    # Get document - including soft-deleted ones
-    doc_result = client.table("documents").select("*").eq("id", doc_id).eq("org_id", org_id).single().execute()
+    # Get document from archive
+    archive_result = client.table("deleted_documents").select("*").eq("id", doc_id).eq("org_id", org_id).single().execute()
 
-    if not doc_result.data:
-        raise HTTPException(status_code=404, detail="Document not found")
+    if not archive_result.data:
+        raise HTTPException(status_code=404, detail="Archived document not found")
 
-    if not doc_result.data.get("deleted_at"):
-        raise HTTPException(status_code=400, detail="Document is not deleted")
+    archived_doc = archive_result.data
 
     try:
-        # Restore the document
-        client.table("documents").update({
-            "deleted_at": None,
-            "deleted_by": None
-        }).eq("id", doc_id).execute()
+        # Check if a document with the same filename already exists
+        existing = client.table("documents").select("id").eq("filename", archived_doc["filename"]).eq("org_id", org_id).maybe_single().execute()
+        if existing.data:
+            raise HTTPException(
+                status_code=400,
+                detail=f"A document named '{archived_doc['filename']}' already exists. Delete it first before restoring."
+            )
+
+        # 1. Insert back into documents table (without chunks - they'll be regenerated)
+        doc_data = {
+            "id": archived_doc["id"],
+            "filename": archived_doc["filename"],
+            "original_filename": archived_doc.get("original_filename"),
+            "file_path": archived_doc.get("file_path"),
+            "storage_path": archived_doc.get("storage_path"),
+            "file_size_bytes": archived_doc.get("file_size_bytes"),
+            "mime_type": archived_doc.get("mime_type"),
+            "year": archived_doc.get("year"),
+            "department": archived_doc.get("department"),
+            "category": archived_doc.get("category"),
+            "stream": archived_doc.get("stream"),
+            "semester": archived_doc.get("semester"),
+            "one_line_summary": archived_doc.get("one_line_summary"),
+            "brief_summary": archived_doc.get("brief_summary"),
+            "org_id": archived_doc["org_id"],
+            "stream_id": archived_doc.get("stream_id"),
+            "department_id": archived_doc.get("department_id"),
+            "year_id": archived_doc.get("year_id"),
+            "uploaded_by": archived_doc.get("uploaded_by"),
+            "created_at": archived_doc.get("created_at")
+        }
+        client.table("documents").insert(doc_data).execute()
+
+        # 2. Remove from archive
+        client.table("deleted_documents").delete().eq("id", doc_id).execute()
+
+        # 3. If storage_path exists, download and re-process to regenerate chunks
+        storage_path = archived_doc.get("storage_path")
+        if storage_path:
+            # Download file from storage for re-processing
+            local_path = os.path.join(settings.upload_directory, archived_doc["filename"])
+            file_bytes = supabase_storage.download_file(storage_path)
+            with open(local_path, "wb") as f:
+                f.write(file_bytes)
+
+            # Re-process to generate chunks and embeddings
+            file_ext = archived_doc["filename"].split(".")[-1].lower()
+            result = document_processor.process_and_store_document(
+                file_path=local_path,
+                filename=archived_doc["filename"],
+                year=archived_doc.get("year", "all"),
+                department=archived_doc.get("department", "all"),
+                category=archived_doc.get("category", "general"),
+                file_type=file_ext,
+                org_id=archived_doc["org_id"],
+                stream=archived_doc.get("stream", "all"),
+                semester=archived_doc.get("semester", "all")
+            )
+
+            # Cleanup local file
+            if os.path.exists(local_path):
+                os.remove(local_path)
 
         return {
             "message": "Document restored successfully",
-            "filename": doc_result.data["filename"]
+            "filename": archived_doc["filename"]
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error restoring document: {e}")
         raise HTTPException(status_code=500, detail=f"Error restoring document: {str(e)}")
@@ -614,14 +716,14 @@ async def restore_document(doc_id: str, admin: dict = Depends(require_admin)):
 @router.get("/documents/deleted")
 async def list_deleted_documents(admin: dict = Depends(require_admin)):
     """
-    List all soft-deleted documents for recovery.
+    List all archived (deleted) documents for recovery.
     """
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
 
-    result = client.table("documents").select(
+    result = client.table("deleted_documents").select(
         "id, filename, category, year, department, deleted_at, deleted_by"
-    ).eq("org_id", org_id).not_.is_("deleted_at", "null").order("deleted_at", desc=True).execute()
+    ).eq("org_id", org_id).order("deleted_at", desc=True).execute()
 
     # Get deleter names
     docs = []

@@ -145,9 +145,13 @@ class SupabaseVectorStore:
         # Insert each document
         for source_file, doc_info in docs_by_source.items():
             meta = doc_info["metadata"]
+            org_id = meta.get("org_id")
 
-            # Check if document already exists
-            existing = self.client.table("documents").select("id").eq("filename", source_file).execute()
+            # Check if document already exists (filter by org_id for tenant isolation)
+            query = self.client.table("documents").select("id").eq("filename", source_file)
+            if org_id:
+                query = query.eq("org_id", org_id)
+            existing = query.execute()
 
             if existing.data:
                 document_id = existing.data[0]["id"]
