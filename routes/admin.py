@@ -42,6 +42,20 @@ router = APIRouter()
 settings = get_settings()
 
 
+def refresh_document_stats():
+    """
+    Refresh the admin_document_stats materialized view.
+    Call after document upload, delete, or restore to keep stats current.
+    """
+    try:
+        client = get_supabase_admin_client()
+        client.rpc("refresh_admin_document_stats", {}).execute()
+        logger.debug("Refreshed admin_document_stats materialized view")
+    except Exception as e:
+        # Log but don't fail the operation - stats will catch up on next refresh
+        logger.warning(f"Failed to refresh admin_document_stats: {e}")
+
+
 def get_document_registry() -> dict:
     """
     Get document registry from Supabase database.
@@ -329,6 +343,9 @@ async def upload_document(
         if os.path.exists(file_path):
             os.remove(file_path)
 
+        # Refresh materialized view for updated stats
+        refresh_document_stats()
+
         return result
 
     except Exception as e:
@@ -386,46 +403,42 @@ async def list_documents(
 async def get_documents_by_category(admin: dict = Depends(require_admin)):
     """
     Get all documents grouped by category.
+    OPTIMIZED: Uses single RPC call instead of N+1 queries.
     """
     client = get_supabase_admin_client()
     admin_org_id = admin.get("org_id")
 
-    # Get dynamic categories for this org
-    cat_result = client.table("categories").select("slug").eq("org_id", admin_org_id).execute()
-    category_slugs = [c["slug"] for c in cat_result.data] if cat_result.data else []
+    if not admin_org_id:
+        raise HTTPException(status_code=400, detail="User has no organization")
+
+    # Single RPC call replaces N+1 queries (was: 1 + categories × documents queries)
+    result = client.rpc("get_documents_by_category", {"p_org_id": admin_org_id}).execute()
 
     categories_data = []
     total_documents = 0
 
-    for category in category_slugs:
-        # Filter documents by category AND org_id, exclude soft-deleted
-        query = client.table("documents").select("*").eq("category", category).is_("deleted_at", "null").order("created_at", desc=True)
-        if admin_org_id:
-            query = query.eq("org_id", admin_org_id)
-        result = query.execute()
+    if result.data:
+        for cat_data in result.data:
+            category_docs = []
+            for doc in cat_data.get("documents", []):
+                category_docs.append({
+                    "id": doc["id"],
+                    "filename": doc["filename"],
+                    "stream": doc.get("stream") or "all",
+                    "year": doc["year"],
+                    "department": doc["department"],
+                    "category": doc["category"],
+                    "upload_date": doc["upload_date"],
+                    "chunk_count": doc.get("chunk_count", 0)
+                })
 
-        category_docs = []
-        for doc in result.data:
-            chunk_result = client.table("document_chunks").select("id", count="exact").eq("document_id", doc["id"]).execute()
+            total_documents += len(category_docs)
 
-            category_docs.append({
-                "id": doc["id"],
-                "filename": doc["filename"],
-                "stream": doc.get("stream") or "all",
-                "year": doc["year"],
-                "department": doc["department"],
-                "category": doc["category"],
-                "upload_date": doc["created_at"],
-                "chunk_count": chunk_result.count or 0
-            })
-
-        total_documents += len(category_docs)
-
-        categories_data.append(CategoryStats(
-            category=category,
-            count=len(category_docs),
-            documents=category_docs
-        ))
+            categories_data.append(CategoryStats(
+                category=cat_data["category"],
+                count=cat_data["count"],
+                documents=category_docs
+            ))
 
     return DocumentsByCategory(
         categories=categories_data,
@@ -478,42 +491,34 @@ async def get_documents_for_category(
 async def get_admin_stats(admin: dict = Depends(require_admin)):
     """
     Get admin dashboard statistics.
+    OPTIMIZED: Uses single RPC call instead of 8-12 separate queries.
     """
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
 
-    # Count documents by category for this org (exclude soft-deleted)
-    docs_by_category = {}
-    for category in VALID_CATEGORIES:
-        result = client.table("documents").select("id", count="exact").eq("org_id", org_id).eq("category", category).is_("deleted_at", "null").execute()
-        docs_by_category[category] = result.count or 0
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User has no organization")
 
-    # Total documents for this org (exclude soft-deleted)
-    total_docs_result = client.table("documents").select("id", count="exact").eq("org_id", org_id).is_("deleted_at", "null").execute()
+    # Single RPC call replaces 8-12 queries + file system operations
+    result = client.rpc("get_admin_stats", {"p_org_id": org_id}).execute()
 
-    # Total chunks for this org's active documents only
-    org_doc_ids = client.table("documents").select("id").eq("org_id", org_id).is_("deleted_at", "null").execute()
-    doc_ids = [d["id"] for d in org_doc_ids.data] if org_doc_ids.data else []
-    total_chunks = 0
-    if doc_ids:
-        total_chunks_result = client.table("document_chunks").select("id", count="exact").in_("document_id", doc_ids).execute()
-        total_chunks = total_chunks_result.count or 0
+    if result.data:
+        stats = result.data
+        total_size_bytes = stats.get("total_storage_bytes", 0) or 0
+        total_size_mb = total_size_bytes / (1024 * 1024)
 
-    # Calculate total storage size for this org (active documents only)
-    docs_result = client.table("documents").select("filename").eq("org_id", org_id).is_("deleted_at", "null").execute()
-    total_size = 0
-    for doc in docs_result.data:
-        file_path = os.path.join(settings.upload_directory, doc["filename"])
-        if os.path.exists(file_path):
-            total_size += os.path.getsize(file_path)
-
-    total_size_mb = total_size / (1024 * 1024)
+        return AdminStats(
+            total_documents=stats.get("total_documents", 0),
+            total_chunks=stats.get("total_chunks", 0),
+            documents_by_category=stats.get("by_category", {}),
+            total_size_mb=round(total_size_mb, 2)
+        )
 
     return AdminStats(
-        total_documents=total_docs_result.count or 0,
-        total_chunks=total_chunks,
-        documents_by_category=docs_by_category,
-        total_size_mb=round(total_size_mb, 2)
+        total_documents=0,
+        total_chunks=0,
+        documents_by_category={},
+        total_size_mb=0.0
     )
 
 
@@ -572,6 +577,9 @@ async def delete_document(
             if os.path.exists(file_path):
                 os.remove(file_path)
 
+            # Refresh materialized view for updated stats
+            refresh_document_stats()
+
             return {
                 "message": "Document permanently deleted",
                 "filename": doc_info["filename"],
@@ -609,6 +617,9 @@ async def delete_document(
 
             # 2. Delete from documents table (chunks cascade automatically)
             client.table("documents").delete().eq("id", doc_id).execute()
+
+            # Refresh materialized view for updated stats
+            refresh_document_stats()
 
             return {
                 "message": "Document archived (can be restored)",
@@ -706,6 +717,9 @@ async def restore_document(doc_id: str, admin: dict = Depends(require_admin)):
             # Cleanup local file
             if os.path.exists(local_path):
                 os.remove(local_path)
+
+        # Refresh materialized view for updated stats
+        refresh_document_stats()
 
         return {
             "message": "Document restored successfully",
