@@ -403,7 +403,7 @@ async def list_documents(
 async def get_documents_by_category(admin: dict = Depends(require_admin)):
     """
     Get all documents grouped by category.
-    OPTIMIZED: Uses single RPC call instead of N+1 queries.
+    Uses direct table query to ensure fresh data.
     """
     client = get_supabase_admin_client()
     admin_org_id = admin.get("org_id")
@@ -411,35 +411,47 @@ async def get_documents_by_category(admin: dict = Depends(require_admin)):
     if not admin_org_id:
         raise HTTPException(status_code=400, detail="User has no organization")
 
-    # Single RPC call replaces N+1 queries (was: 1 + categories × documents queries)
-    result = client.rpc("get_documents_by_category", {"p_org_id": admin_org_id}).execute()
-
+    # Direct query instead of RPC to ensure fresh data
+    result = client.table("documents").select("*").eq("org_id", admin_org_id).is_("deleted_at", "null").order("created_at", desc=True).execute()
+    
+    # Get all categories
+    cats_result = client.table("categories").select("slug").execute()
+    all_category_slugs = [c["slug"] for c in cats_result.data] if cats_result.data else []
+    
+    # Group documents by category
+    docs_by_cat: dict[str, list] = {slug: [] for slug in all_category_slugs}
+    
+    for doc in result.data or []:
+        cat = doc.get("category", "general")
+        if cat not in docs_by_cat:
+            docs_by_cat[cat] = []
+        
+        # Get chunk count for this document
+        chunk_result = client.table("document_chunks").select("id", count="exact").eq("document_id", doc["id"]).execute()
+        
+        docs_by_cat[cat].append({
+            "id": doc["id"],
+            "filename": doc["filename"],
+            "stream": doc.get("stream") or "all",
+            "year": doc.get("year") or "all",
+            "department": doc.get("department") or "all",
+            "category": cat,
+            "upload_date": doc["created_at"],
+            "chunk_count": chunk_result.count or 0
+        })
+    
     categories_data = []
     total_documents = 0
-
-    if result.data:
-        for cat_data in result.data:
-            category_docs = []
-            for doc in cat_data.get("documents", []):
-                category_docs.append({
-                    "id": doc["id"],
-                    "filename": doc["filename"],
-                    "stream": doc.get("stream") or "all",
-                    "year": doc["year"],
-                    "department": doc["department"],
-                    "category": doc["category"],
-                    "upload_date": doc["upload_date"],
-                    "chunk_count": doc.get("chunk_count", 0)
-                })
-
-            total_documents += len(category_docs)
-
-            categories_data.append(CategoryStats(
-                category=cat_data["category"],
-                count=cat_data["count"],
-                documents=category_docs
-            ))
-
+    
+    for cat_slug in all_category_slugs:
+        cat_docs = docs_by_cat.get(cat_slug, [])
+        total_documents += len(cat_docs)
+        categories_data.append(CategoryStats(
+            category=cat_slug,
+            count=len(cat_docs),
+            documents=cat_docs
+        ))
+    
     return DocumentsByCategory(
         categories=categories_data,
         total_documents=total_documents
@@ -800,10 +812,23 @@ async def rename_document(
 
     try:
         new_storage_path = storage_path
-        
-        # Rename in Supabase Storage if storage_path exists
+        storage_renamed = False
+
+        # Try to rename in Supabase Storage if storage_path exists
         if storage_path:
-            new_storage_path = supabase_storage.rename_file(storage_path, new_filename)
+            try:
+                new_storage_path = supabase_storage.rename_file(storage_path, new_filename)
+                storage_renamed = True
+                logger.info(f"Storage file renamed: {storage_path} -> {new_storage_path}")
+            except Exception as storage_err:
+                # Storage rename failed (file might not exist) - continue with DB update only
+                logger.warning(f"Storage rename failed (continuing with DB update): {storage_err}")
+                # Update storage_path to new filename anyway (keep bucket, change filename)
+                if "/" in storage_path:
+                    bucket = storage_path.split("/")[0]
+                    new_storage_path = f"{bucket}/{new_filename}"
+                else:
+                    new_storage_path = new_filename
 
         # Update in Supabase DB
         client.table("documents").update({
@@ -813,25 +838,33 @@ async def rename_document(
             "storage_path": new_storage_path
         }).eq("id", doc_id).execute()
 
+        # Verify the update actually happened by fetching the updated record
+        verify_result = client.table("documents").select("id, filename").eq("id", doc_id).single().execute()
+        if not verify_result.data or verify_result.data.get("filename") != new_filename:
+            logger.error(f"Document rename update verification failed for doc_id: {doc_id}")
+            raise HTTPException(status_code=500, detail="Failed to update document in database")
+
+        logger.info(f"Document renamed successfully: {old_filename} -> {new_filename}")
+
         # Also rename local file if exists (legacy)
         old_file_path = os.path.join(settings.upload_directory, old_filename)
         new_file_path = os.path.join(settings.upload_directory, new_filename)
         if os.path.exists(old_file_path):
-            os.rename(old_file_path, new_file_path)
+            try:
+                os.rename(old_file_path, new_file_path)
+            except Exception as local_err:
+                logger.warning(f"Local file rename failed: {local_err}")
 
         return {
             "message": "Document renamed successfully",
             "old_filename": old_filename,
-            "new_filename": new_filename
+            "new_filename": new_filename,
+            "storage_renamed": storage_renamed
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        # Rollback file rename
-        if os.path.exists(new_file_path) and not os.path.exists(old_file_path):
-            try:
-                os.rename(new_file_path, old_file_path)
-            except Exception:
-                pass
         logger.error(f"Error renaming document: {e}")
         raise HTTPException(status_code=500, detail=f"Error renaming document: {str(e)}")
 
