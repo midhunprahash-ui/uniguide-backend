@@ -1,17 +1,22 @@
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
-from typing import Optional
 import json
+import logging
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from models.schemas import ChatQuery, ChatResponse
+from services.auth import require_valid_org_id
 from services.chat_sessions import session_manager
 from services.rag_engine import rag_engine
+from services.rate_limiter import limiter, RATE_LIMITS, get_org_key
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 @router.get("/session/{session_id}")
-async def get_session_history(session_id: str):
+@limiter.limit(RATE_LIMITS["public"])
+async def get_session_history(request: Request, session_id: str):
     """
     Get chat session with its message history.
     Used to restore chat after page refresh.
@@ -25,11 +30,17 @@ async def get_session_history(session_id: str):
 
 
 @router.post("/query-stream")
-async def query_chat_stream(query: ChatQuery):
+@limiter.limit(RATE_LIMITS["chat"], key_func=get_org_key)
+async def query_chat_stream(request: Request, query: ChatQuery):
     """
     Stream chat response using Server-Sent Events (SSE).
+
+    SECURITY: org_id is validated to prevent cross-tenant data access.
     """
     try:
+        # CRITICAL: Validate org_id to prevent tenant isolation bypass
+        require_valid_org_id(query.org_id)
+
         # Get or create session
         session_id = query.session_id
         if not session_id or not session_manager.get_session(session_id):
@@ -99,9 +110,12 @@ async def query_chat_stream(query: ChatQuery):
 
 
 @router.post("/query", response_model=ChatResponse)
-async def query_chat(query: ChatQuery):
+@limiter.limit(RATE_LIMITS["chat"], key_func=get_org_key)
+async def query_chat(request: Request, query: ChatQuery):
     """
     Student chat endpoint to query the RAG system with conversation history.
+
+    SECURITY: org_id is validated to prevent cross-tenant data access.
 
     Args:
         query: ChatQuery containing question, year, department, and optional session_id
@@ -110,6 +124,9 @@ async def query_chat(query: ChatQuery):
         ChatResponse with answer, sources, and session_id
     """
     try:
+        # CRITICAL: Validate org_id to prevent tenant isolation bypass
+        require_valid_org_id(query.org_id)
+
         # Get or create session
         session_id = query.session_id
         if not session_id or not session_manager.get_session(session_id):

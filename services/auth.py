@@ -2,6 +2,8 @@
 Authentication service using Supabase Auth.
 Provides JWT verification and role-based access control.
 """
+import logging
+from functools import lru_cache
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -9,8 +11,13 @@ from supabase import Client, create_client
 
 from config import get_settings
 
+logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
 settings = get_settings()
+
+# Cache for valid org_ids (reduces database lookups)
+_valid_org_ids_cache: set[str] = set()
+_org_cache_loaded = False
 
 
 def get_supabase_client() -> Client:
@@ -152,3 +159,110 @@ async def require_superadmin(
         )
 
     return admin
+
+
+# =============================================================================
+# Organization ID Validation (for tenant isolation)
+# =============================================================================
+
+def _load_valid_org_ids() -> set[str]:
+    """Load all valid org_ids from the database (cached)."""
+    global _valid_org_ids_cache, _org_cache_loaded
+
+    if _org_cache_loaded:
+        return _valid_org_ids_cache
+
+    try:
+        client = get_supabase_client()
+        result = client.table("organizations").select("id").execute()
+
+        if result.data:
+            _valid_org_ids_cache = {str(org["id"]) for org in result.data}
+            _org_cache_loaded = True
+            logger.info(f"Loaded {len(_valid_org_ids_cache)} valid org_ids into cache")
+        else:
+            _valid_org_ids_cache = set()
+            _org_cache_loaded = True
+
+    except Exception as e:
+        logger.error(f"Failed to load org_ids: {e}")
+        # Don't cache on failure - retry next time
+        return set()
+
+    return _valid_org_ids_cache
+
+
+def refresh_org_cache() -> None:
+    """Force refresh the org_id cache (call when orgs are added/removed)."""
+    global _org_cache_loaded
+    _org_cache_loaded = False
+    _load_valid_org_ids()
+
+
+def validate_org_id(org_id: str) -> bool:
+    """
+    Validate that an org_id exists in the organizations table.
+
+    This is a CRITICAL security function for multi-tenant isolation.
+    It prevents users from accessing documents from other organizations
+    by spoofing org_id in requests.
+
+    Args:
+        org_id: The organization ID to validate
+
+    Returns:
+        True if valid, False otherwise
+    """
+    if not org_id:
+        return False
+
+    # Check cache first
+    valid_orgs = _load_valid_org_ids()
+    if org_id in valid_orgs:
+        return True
+
+    # If not in cache, do a direct lookup (might be newly created)
+    try:
+        client = get_supabase_client()
+        result = client.table("organizations").select("id").eq("id", org_id).limit(1).execute()
+
+        if result.data and len(result.data) > 0:
+            # Add to cache
+            _valid_org_ids_cache.add(org_id)
+            return True
+
+    except Exception as e:
+        logger.error(f"Error validating org_id {org_id}: {e}")
+
+    return False
+
+
+def require_valid_org_id(org_id: str) -> str:
+    """
+    Validate org_id and raise HTTPException if invalid.
+
+    Use this in route handlers to ensure tenant isolation.
+
+    Args:
+        org_id: The organization ID from the request
+
+    Returns:
+        The validated org_id
+
+    Raises:
+        HTTPException: If org_id is invalid
+    """
+    if not org_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="org_id is required"
+        )
+
+    if not validate_org_id(org_id):
+        logger.warning(f"Invalid org_id attempted: {org_id}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid organization"
+        )
+
+    return org_id

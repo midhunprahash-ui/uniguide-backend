@@ -7,7 +7,7 @@ import os
 import shutil
 import uuid as uuid_module
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 
 
 def is_valid_uuid(val: str | None) -> bool:
@@ -36,6 +36,7 @@ from services.document_processor import document_processor
 from services.supabase_auth import require_admin
 from services.supabase_client import get_supabase_admin_client
 from services.vector_store import vector_store
+from services.rate_limiter import limiter, RATE_LIMITS, get_org_key, get_ip_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -87,7 +88,8 @@ def get_document_registry() -> dict:
 
 
 @router.post("/login", response_model=Token)
-async def admin_login(credentials: AdminLogin):
+@limiter.limit(RATE_LIMITS["public"], key_func=get_ip_key)
+async def admin_login(request: Request, credentials: AdminLogin):
     """
     Admin login endpoint.
 
@@ -137,7 +139,8 @@ async def admin_login(credentials: AdminLogin):
 
 
 @router.get("/validate-token")
-async def validate_token(admin: dict = Depends(require_admin)):
+@limiter.limit(RATE_LIMITS["admin"], key_func=get_org_key)
+async def validate_token(request: Request, admin: dict = Depends(require_admin)):
     """
     Validate the current token and return user info.
     Used by frontend to verify authentication state.
@@ -158,7 +161,9 @@ async def validate_token(admin: dict = Depends(require_admin)):
 
 
 @router.post("/upload")
+@limiter.limit(RATE_LIMITS["upload"], key_func=get_org_key)
 async def upload_document(
+    request: Request,
     file: UploadFile = File(...),
     year: str = Form(...),
     department: str = Form(...),

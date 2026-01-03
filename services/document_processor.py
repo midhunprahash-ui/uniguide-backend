@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 
@@ -8,18 +9,29 @@ from PIL import Image
 
 from config import get_settings
 from services.rag_engine import rag_engine
+from services.semantic_chunker import SemanticChunker, EnhancedChunk
 from services.vector_store import vector_store
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 class DocumentProcessor:
     def __init__(self):
-        """Initialize document processor."""
+        """Initialize document processor with semantic chunking."""
         os.makedirs(settings.upload_directory, exist_ok=True)
         # Configure Gemini
         genai.configure(api_key=settings.gemini_api_key)
         self.vision_model = genai.GenerativeModel("gemini-2.0-flash-exp")
-        print("DocumentProcessor initialized with Gemini Vision.")
+
+        # Initialize semantic chunker with optimized settings
+        self.chunker = SemanticChunker(
+            target_chunk_size=512,   # ~512 tokens per chunk
+            max_chunk_size=1024,     # Hard limit
+            min_chunk_size=100,      # Skip tiny chunks
+            overlap_sentences=2      # Context continuity
+        )
+
+        logger.info("DocumentProcessor initialized with Gemini Vision and Semantic Chunker")
 
     def process_pdf(self, file_path: str) -> str:
         """Extract text from PDF file."""
@@ -121,22 +133,53 @@ Extract everything now:"""
             return ""
 
     def chunk_text(self, text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
-        """Split text into overlapping chunks."""
+        """
+        Split text into semantic chunks.
+
+        Uses sentence-aware chunking that preserves context and respects
+        document structure. Falls back to simple splitting for edge cases.
+
+        Args:
+            text: The document text to chunk
+            chunk_size: Ignored (kept for backwards compatibility)
+            overlap: Ignored (kept for backwards compatibility)
+
+        Returns:
+            List of chunk text strings
+        """
         if not text.strip():
             return []
 
-        chunks = []
-        words = text.split()
+        # Use semantic chunker for intelligent sentence-aware splitting
+        enhanced_chunks = self.chunker.chunk_with_fallback(text)
 
-        if len(words) <= chunk_size:
-            return [text]
+        if not enhanced_chunks:
+            return []
 
-        for i in range(0, len(words), chunk_size - overlap):
-            chunk = ' '.join(words[i:i + chunk_size])
-            if chunk.strip():
-                chunks.append(chunk)
+        # Return just the text for backwards compatibility
+        return [chunk.text for chunk in enhanced_chunks]
 
-        return chunks
+    def chunk_text_enhanced(self, text: str) -> list[EnhancedChunk]:
+        """
+        Split text into semantic chunks with rich metadata.
+
+        Returns EnhancedChunk objects containing:
+        - text: The chunk content
+        - chunk_number: Sequential chunk index
+        - char_start/char_end: Character positions in original text
+        - section_header: Extracted section header if found
+        - token_count: Estimated token count
+
+        Args:
+            text: The document text to chunk
+
+        Returns:
+            List of EnhancedChunk objects with metadata
+        """
+        if not text.strip():
+            return []
+
+        return self.chunker.chunk_with_fallback(text)
 
     def process_and_store_document(
         self,
@@ -150,7 +193,12 @@ Extract everything now:"""
         stream: str = "all",
         semester: str = "all"
     ) -> dict:
-        """Process document and store in vector database."""
+        """
+        Process document and store in vector database with semantic chunking.
+
+        Uses intelligent sentence-aware chunking that preserves context and
+        extracts rich metadata including section headers and character positions.
+        """
         # Extract text based on file type
         if file_type in ['pdf', 'application/pdf']:
             text = self.process_pdf(file_path)
@@ -164,22 +212,27 @@ Extract everything now:"""
         if not text.strip():
             raise ValueError("No text could be extracted from the document")
 
-        # Chunk the text
-        chunks = self.chunk_text(text)
+        # Use enhanced semantic chunking with metadata
+        enhanced_chunks = self.chunk_text_enhanced(text)
 
-        if not chunks:
+        if not enhanced_chunks:
             raise ValueError("No valid chunks created from the document")
+
+        logger.info(f"Created {len(enhanced_chunks)} semantic chunks from {filename}")
 
         # Generate embeddings for each chunk
         embeddings = []
         metadatas = []
         ids = []
+        chunk_texts = []
         doc_id = str(uuid.uuid4())
 
-        for i, chunk in enumerate(chunks):
-            embedding = rag_engine.generate_embedding(chunk)
+        for chunk in enhanced_chunks:
+            embedding = rag_engine.generate_embedding(chunk.text)
             embeddings.append(embedding)
+            chunk_texts.append(chunk.text)
 
+            # Include enhanced metadata from semantic chunker
             metadata = {
                 "year": year,
                 "department": department,
@@ -187,25 +240,39 @@ Extract everything now:"""
                 "stream": stream,
                 "semester": semester,
                 "source_file": filename,
-                "chunk_id": i,
+                "chunk_id": chunk.chunk_number,
+                "chunk_number": chunk.chunk_number,
                 "doc_id": doc_id,
-                "org_id": org_id
+                "org_id": org_id,
+                # Enhanced metadata from semantic chunker
+                "char_start": chunk.char_start,
+                "char_end": chunk.char_end,
+                "section_header": chunk.section_header,
+                "token_count": chunk.token_count,
             }
             metadatas.append(metadata)
-            ids.append(f"{doc_id}_{i}")
+            ids.append(f"{doc_id}_{chunk.chunk_number}")
 
         # Store in vector database
         vector_store.add_documents(
-            texts=chunks,
+            texts=chunk_texts,
             embeddings=embeddings,
             metadatas=metadatas,
             ids=ids
         )
 
+        # Calculate total tokens for logging
+        total_tokens = sum(c.token_count or 0 for c in enhanced_chunks)
+        logger.info(
+            f"Stored {len(enhanced_chunks)} chunks ({total_tokens} estimated tokens) "
+            f"for document: {filename}"
+        )
+
         return {
             "doc_id": doc_id,
             "filename": filename,
-            "chunk_count": len(chunks),
+            "chunk_count": len(enhanced_chunks),
+            "total_tokens": total_tokens,
             "year": year,
             "department": department,
             "category": category,

@@ -1,3 +1,4 @@
+import logging
 
 import google.generativeai as genai
 
@@ -5,22 +6,55 @@ from config import get_settings
 from services.vector_store import vector_store
 from services.supabase_client import get_supabase_admin_client
 
+# Enhanced RAG components
+from services.query_processor import query_processor, QueryIntent
+from services.hybrid_search import hybrid_search, HybridSearchResult
+from services.reranker import reranker
+from services.prompt_security import prompt_guard
+from services.response_cache import response_cache
+
 settings = get_settings()
 genai.configure(api_key=settings.gemini_api_key)
+logger = logging.getLogger(__name__)
 
 class RAGEngine:
-    def __init__(self):
-        """Initialize RAG engine with local embeddings and Gemini generation."""
-        # Use local embedding model (no API calls!)
-        self._embedding_model = None
-        # Keep Gemini only for answer generation
-        self.generation_model = genai.GenerativeModel("gemini-2.0-flash-exp")
+    def __init__(
+        self,
+        use_hybrid_search: bool = True,
+        use_reranking: bool = True,
+        use_cache: bool = True,
+        use_prompt_security: bool = True
+    ):
+        """
+        Initialize enhanced RAG engine with configurable components.
+
+        Args:
+            use_hybrid_search: Enable vector + keyword hybrid search
+            use_reranking: Enable cross-encoder reranking
+            use_cache: Enable response caching for FAQ queries
+            use_prompt_security: Enable prompt injection protection
+        """
+        # Configuration flags
+        self.use_hybrid_search = use_hybrid_search
+        self.use_reranking = use_reranking
+        self.use_cache = use_cache
+        self.use_prompt_security = use_prompt_security
+
+        # Keep Gemini for answer generation
+        self.generation_model = genai.GenerativeModel("gemini-2.5-flash")
+
         # Cache for category names
         self._category_cache = {}
         # Cache for stream to year codes mapping (via departments)
         self._stream_years_cache = {}
         # Cache for department to year codes mapping
         self._department_years_cache = {}
+
+        logger.info(
+            f"RAGEngine initialized: hybrid_search={use_hybrid_search}, "
+            f"reranking={use_reranking}, cache={use_cache}, "
+            f"prompt_security={use_prompt_security}"
+        )
 
     def get_category_name(self, category_slug: str) -> str:
         """Look up category name from database by slug."""
@@ -211,9 +245,27 @@ class RAGEngine:
         year: str,
         department: str,
         category: str = "rules",
-        conversation_history: list[dict[str, str]] = None
+        conversation_history: list[dict[str, str]] = None,
+        safe_context: str = None,
+        safety_preamble: str = ""
     ) -> str:
-        """Generate answer using Gemini with retrieved context."""
+        """
+        Generate answer using Gemini with retrieved context.
+
+        Args:
+            query: The user's question
+            context_chunks: Retrieved document chunks
+            sources: Source document names
+            year: Student's year
+            department: Student's department
+            category: Document category
+            conversation_history: Previous messages
+            safe_context: Pre-sanitized context from prompt_guard (optional)
+            safety_preamble: Safety instructions to prepend (optional)
+
+        Returns:
+            Generated answer string
+        """
         from collections import defaultdict
         from datetime import datetime
         current_date = datetime.now().strftime("%Y-%m-%d")
@@ -221,23 +273,28 @@ class RAGEngine:
         # Look up the human-readable category name
         category_name = self.get_category_name(category)
 
-        # Group chunks by source document to prevent confusion
-        source_grouped = defaultdict(list)
-        for chunk, source in zip(context_chunks, sources, strict=False):
-            source_grouped[source].append(chunk)
+        # Use pre-sanitized context if provided, otherwise build normally
+        if safe_context:
+            context_text = safe_context
+            unique_sources = list(set(sources))
+        else:
+            # Group chunks by source document to prevent confusion
+            source_grouped = defaultdict(list)
+            for chunk, source in zip(context_chunks, sources, strict=False):
+                source_grouped[source].append(chunk)
 
-        # Build context with clear document separation
-        context_sections = []
-        unique_sources = list(source_grouped.keys())
+            # Build context with clear document separation
+            context_sections = []
+            unique_sources = list(source_grouped.keys())
 
-        for i, source in enumerate(unique_sources, 1):
-            chunks = source_grouped[source]
-            section_content = "\n\n".join(chunks)
-            context_sections.append(
-                f"### DOCUMENT {i}: {source}\n{section_content}\n### END OF DOCUMENT {i}"
-            )
+            for i, source in enumerate(unique_sources, 1):
+                chunks = source_grouped[source]
+                section_content = "\n\n".join(chunks)
+                context_sections.append(
+                    f"### DOCUMENT {i}: {source}\n{section_content}\n### END OF DOCUMENT {i}"
+                )
 
-        context_text = "\n\n" + "=" * 50 + "\n\n".join(context_sections)
+            context_text = "\n\n" + "=" * 50 + "\n\n".join(context_sections)
 
         # Format conversation history if present
         history_text = ""
@@ -252,7 +309,8 @@ class RAGEngine:
         # Create document list for prompt
         doc_list = "\n".join([f"  - Document {i}: {src}" for i, src in enumerate(unique_sources, 1)])
 
-        prompt = f"""You are a friendly and intelligent assistant for college students at St. Joseph's Group of Institutions. Your role is to help students with questions about the institution's rules, regulations, schedules, and academic matters.
+        # Build prompt with optional safety preamble for prompt injection protection
+        prompt = f"""{safety_preamble}You are a friendly and intelligent assistant for college students at St. Joseph's Group of Institutions. Your role is to help students with questions about the institution's rules, regulations, schedules, and academic matters.
 
 Current Date: {current_date}
 
@@ -451,31 +509,189 @@ Be specific about dates, events, or actions mentioned in the circular."""
         org_id: str,
         conversation_history: list[dict[str, str]] = None
     ) -> dict[str, any]:
-        """Complete RAG pipeline: retrieve context and generate answer.
+        """
+        Enhanced RAG pipeline with query processing, hybrid search,
+        reranking, prompt security, and response caching.
 
         Args:
-            org_id: REQUIRED - Organization ID for multi-tenant isolation.
+            question: The user's question
+            stream: Stream filter (UG/PG/all)
+            year: Year filter
+            department: Department filter
+            category: Document category
+            org_id: REQUIRED - Organization ID for multi-tenant isolation
+            conversation_history: Previous messages in the conversation
+
+        Returns:
+            Dict with 'answer', 'sources', and 'cached' flag
         """
-        # Retrieve relevant context
-        context_chunks, sources = self.retrieve_context(question, stream, year, department, category, org_id)
+        # Step 1: Process query for intent detection and preprocessing
+        processed = query_processor.process(question)
+        category_name = self.get_category_name(category)
+
+        # Step 2: Handle conversational queries without retrieval
+        if processed.is_conversational:
+            return self._handle_conversational(processed, category_name)
+
+        # Step 3: Get the search query (with abbreviation expansion)
+        search_query = query_processor.get_search_query(processed)
+
+        # Step 4: Generate query embedding
+        query_embedding = self.generate_query_embedding(search_query)
+
+        # Step 5: Check cache for similar queries
+        if self.use_cache:
+            cached = response_cache.get(
+                query=question,
+                query_embedding=query_embedding,
+                org_id=org_id,
+                category=category,
+                year=year,
+                department=department
+            )
+            if cached:
+                logger.debug(f"Cache hit for query: {question[:50]}...")
+                return {
+                    "answer": cached.answer,
+                    "sources": cached.sources,
+                    "cached": True
+                }
+
+        # Step 6: Retrieve context using hybrid or vector-only search
+        if self.use_hybrid_search:
+            context_chunks, sources, scores = self._retrieve_hybrid(
+                query=search_query,
+                query_embedding=query_embedding,
+                stream=stream,
+                year=year,
+                department=department,
+                category=category,
+                org_id=org_id,
+                n_results=10 if self.use_reranking else 5
+            )
+        else:
+            context_chunks, sources = self.retrieve_context(
+                question, stream, year, department, category, org_id
+            )
+            scores = []
 
         if not context_chunks:
             return {
                 "answer": "I don't have any information about this topic for your year and department yet. Please contact the administration or check if documents have been uploaded.",
-                "sources": []
+                "sources": [],
+                "cached": False
             }
 
-        # Generate answer
-        # Pass the full list of sources (corresponding to chunks) and conversation history to generate_answer
-        answer = self.generate_answer(question, context_chunks, sources, year, department, category, conversation_history or [])
+        # Step 7: Rerank results if enabled
+        if self.use_reranking and len(context_chunks) > 5:
+            reranked = reranker.rerank(
+                query=question,
+                results=[
+                    {"content": chunk, "similarity": scores[i] if i < len(scores) else 0.5, "filename": sources[i]}
+                    for i, chunk in enumerate(context_chunks)
+                ],
+                top_k=5
+            )
+            context_chunks = [r.content for r in reranked]
+            sources = [r.metadata.get("filename", "Unknown") for r in reranked]
+            logger.debug(f"Reranked {len(reranked)} results")
 
-        # Deduplicate sources
+        # Step 8: Apply prompt security if enabled
+        if self.use_prompt_security:
+            safe_context = prompt_guard.build_safe_context(context_chunks, sources)
+            safety_preamble = prompt_guard.get_safety_preamble()
+        else:
+            safe_context = None
+            safety_preamble = ""
+
+        # Step 9: Generate answer
+        answer = self.generate_answer(
+            question,
+            context_chunks,
+            sources,
+            year,
+            department,
+            category,
+            conversation_history or [],
+            safe_context=safe_context,
+            safety_preamble=safety_preamble
+        )
+
+        # Step 10: Cache the response
         unique_sources = list(set(sources))
+        if self.use_cache:
+            response_cache.set(
+                query=question,
+                query_embedding=query_embedding,
+                org_id=org_id,
+                category=category,
+                year=year,
+                department=department,
+                answer=answer,
+                sources=unique_sources
+            )
 
         return {
             "answer": answer,
-            "sources": unique_sources
+            "sources": unique_sources,
+            "cached": False
         }
+
+    def _handle_conversational(self, processed, category_name: str) -> dict:
+        """Handle greetings, farewells, and other conversational queries."""
+        responses = {
+            QueryIntent.GREETING: f"Hello! How can I help you today? Feel free to ask me about {category_name}!",
+            QueryIntent.FAREWELL: f"Goodbye! Have a great day! Come back anytime you need help with {category_name}.",
+            QueryIntent.GRATITUDE: f"You're welcome! Feel free to ask if you have more questions about {category_name}.",
+            QueryIntent.ACKNOWLEDGMENT: f"Great! Is there anything else you'd like to know about {category_name}?",
+            QueryIntent.UNCLEAR: f"I didn't quite catch that. Could you rephrase? I'm here to help with {category_name}!",
+        }
+
+        answer = responses.get(processed.intent, f"How can I help you with {category_name}?")
+
+        return {
+            "answer": answer,
+            "sources": [],
+            "cached": False
+        }
+
+    def _retrieve_hybrid(
+        self,
+        query: str,
+        query_embedding: list[float],
+        stream: str,
+        year: str,
+        department: str,
+        category: str,
+        org_id: str,
+        n_results: int = 5
+    ) -> tuple[list[str], list[str], list[float]]:
+        """
+        Retrieve context using hybrid vector + keyword search.
+
+        Returns:
+            Tuple of (chunks, sources, scores)
+        """
+        results = hybrid_search.search(
+            query=query,
+            query_embedding=query_embedding,
+            org_id=org_id,
+            category=category,
+            stream=stream,
+            year=year if year and year.lower() != "all" else None,
+            department=department if department and department.lower() != "all" else None,
+            n_results=n_results,
+            match_threshold=0.25
+        )
+
+        if not results:
+            return [], [], []
+
+        chunks = [r.content for r in results]
+        sources = [r.metadata.get("filename", "Unknown") for r in results]
+        scores = [r.combined_score for r in results]
+
+        return chunks, sources, scores
 
 
     def generate_answer_stream(
