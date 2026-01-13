@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
 from routes import admin, chat, circular, categories, departments, organizations, streams, years, health
+from routes import subjects, notes_admin, notes_chat  # Notes RAG
 from services.rate_limiter import limiter
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -107,6 +108,11 @@ app.include_router(departments.router, prefix="/api/departments", tags=["Departm
 app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])
 app.include_router(streams.router, prefix="/api/streams", tags=["Streams"])
 app.include_router(years.router, prefix="/api/years", tags=["Years"])
+
+# Notes RAG endpoints (isolated from institutional RAG)
+app.include_router(subjects.router, prefix="/api/subjects", tags=["Subjects"])
+app.include_router(notes_admin.router, prefix="/api/notes", tags=["Notes Admin"])
+app.include_router(notes_chat.router, prefix="/api/notes/chat", tags=["Notes Chat"])
 
 
 @app.get("/")
