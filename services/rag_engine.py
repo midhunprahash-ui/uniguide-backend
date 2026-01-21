@@ -499,6 +499,74 @@ Be specific about dates, events, or actions mentioned in the circular."""
                 "brief": f"A circular titled '{filename}' has been uploaded. Ask questions to learn more."
             }
 
+    def generate_note_title(self, document_text: str, filename: str, subject_name: str = None, unit_number: int = None) -> str:
+        """
+        Generate an AI-powered title for an uploaded note based on its content.
+        
+        Args:
+            document_text: The extracted text from the document
+            filename: Original filename for fallback
+            subject_name: Optional subject name for context
+            unit_number: Optional unit number for context
+            
+        Returns:
+            Generated title string (max 100 chars)
+        """
+        context = ""
+        if subject_name:
+            context += f"Subject: {subject_name}\n"
+        if unit_number:
+            context += f"Unit: {unit_number}\n"
+            
+        prompt = f"""You are an assistant for organizing academic notes. A new note has been uploaded.
+
+{context}
+Document filename: {filename}
+Document content (first 3000 chars):
+{document_text[:3000]}
+
+Generate a clear, concise title for this note that describes its main topic.
+- The title should be descriptive and academic
+- Maximum 80 characters
+- Do not include "Unit X" or subject code - those are shown separately
+- Focus on the actual content/topic
+- Examples: "Introduction to Data Structures", "Linked Lists and Operations", "SQL Queries and Joins"
+
+Respond with ONLY the title, nothing else."""
+
+        try:
+            response = self.generation_model.generate_content(prompt)
+            title = response.text.strip()
+            # Clean up any quotes or extra formatting
+            title = title.strip('\"\'')
+            # Limit length
+            if len(title) > 100:
+                title = title[:97] + "..."
+            return title
+        except Exception as e:
+            logger.warning(f"Failed to generate note title: {e}")
+            # Fallback to filename without extension
+            return filename.rsplit('.', 1)[0][:80]
+
+    def generate_text(self, prompt: str, max_tokens: int = 100) -> str:
+        """
+        Generate text using Gemini for simple prompts.
+        
+        Args:
+            prompt: The prompt to send to the LLM
+            max_tokens: Maximum tokens in response (approximate)
+            
+        Returns:
+            Generated text string
+        """
+        try:
+            response = self.generation_model.generate_content(prompt)
+            text = response.text.strip()
+            return text
+        except Exception as e:
+            logger.warning(f"Failed to generate text: {e}")
+            return ""
+
     def query(
         self,
         question: str,

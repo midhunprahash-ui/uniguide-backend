@@ -111,7 +111,7 @@ app.include_router(years.router, prefix="/api/years", tags=["Years"])
 
 # Notes RAG endpoints (isolated from institutional RAG)
 app.include_router(subjects.router, prefix="/api/subjects", tags=["Subjects"])
-app.include_router(notes_admin.router, prefix="/api/notes", tags=["Notes Admin"])
+app.include_router(notes_admin.router, prefix="/api/admin/notes", tags=["Notes Admin"])
 app.include_router(notes_chat.router, prefix="/api/notes/chat", tags=["Notes Chat"])
 
 

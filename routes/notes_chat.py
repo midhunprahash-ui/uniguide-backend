@@ -41,6 +41,24 @@ class NotesResponse(BaseModel):
 
 
 # ============================================================================
+# Session Endpoints
+# ============================================================================
+
+@router.get("/session/{session_id}")
+async def get_notes_session_history(request: Request, session_id: str):
+    """
+    Get notes chat session with its message history.
+    Used to restore notes chat after page refresh.
+    """
+    session_data = session_manager.get_session_with_history(session_id)
+    
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return session_data
+
+
+# ============================================================================
 # Query Endpoints
 # ============================================================================
 

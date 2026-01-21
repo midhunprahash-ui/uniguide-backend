@@ -202,16 +202,40 @@ async def upload_note(
         if not storage_result:
             raise HTTPException(status_code=500, detail="Failed to upload file to storage")
         
-        # Process document (extract text, chunk)
-        chunks_result = document_processor.process_document(
-            file_path=temp_path,
-            source_file=unique_filename
-        )
+        # Process document (extract text based on file type)
+        content_type = file.content_type
+        text = ""
         
-        if not chunks_result or not chunks_result.get("chunks"):
-            raise HTTPException(status_code=500, detail="Failed to process document")
+        if content_type == "application/pdf":
+            text = document_processor.process_pdf(temp_path)
+        elif content_type in ["image/png", "image/jpeg", "image/jpg", "image/webp"]:
+            text = document_processor.process_image(temp_path)
+        elif content_type in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                              "application/vnd.openxmlformats-officedocument.presentationml.presentation"]:
+            # For DOCX/PPTX, try PDF extraction first (may need additional processing)
+            # For now, treat as text if it fails
+            try:
+                text = document_processor.process_pdf(temp_path)
+            except Exception:
+                text = document_processor.process_text(temp_path)
+        else:
+            text = document_processor.process_text(temp_path)
         
-        chunks = chunks_result["chunks"]
+        if not text or not text.strip():
+            raise HTTPException(status_code=500, detail="Failed to extract text from document")
+        
+        # Chunk the text using semantic chunking with metadata
+        enhanced_chunks = document_processor.chunk_text_enhanced(text)
+        
+        if not enhanced_chunks:
+            raise HTTPException(status_code=500, detail="Failed to chunk document")
+        
+        # Convert enhanced chunks to the expected format
+        chunks = [{"text": chunk.text, "token_count": chunk.token_count, "metadata": {
+            "section_header": chunk.section_header,
+            "char_start": chunk.char_start,
+            "char_end": chunk.char_end
+        }} for chunk in enhanced_chunks]
         
         # Generate embeddings for each chunk
         embeddings = []
@@ -233,6 +257,28 @@ async def upload_note(
             logger.warning(f"Failed to generate summary: {e}")
             summaries = {"one_line": None, "brief": None}
         
+        # Generate AI title if not provided
+        if not title:
+            try:
+                # Get subject name for context
+                subject_info = client.table("subjects").select("name").eq("id", unit.data["subject_id"]).single().execute()
+                subject_name = subject_info.data.get("name") if subject_info.data else None
+                
+                # Get unit number for context
+                unit_info = client.table("subject_units").select("unit_number").eq("id", unit_id).single().execute()
+                unit_number = unit_info.data.get("unit_number") if unit_info.data else None
+                
+                title = rag_engine.generate_note_title(
+                    document_text=full_text,
+                    filename=file.filename,
+                    subject_name=subject_name,
+                    unit_number=unit_number
+                )
+                logger.info(f"Generated AI title: {title}")
+            except Exception as e:
+                logger.warning(f"Failed to generate AI title: {e}")
+                title = file.filename
+        
         # Create note record
         note_data = {
             "org_id": org_id,
@@ -246,7 +292,7 @@ async def upload_note(
             "file_path": file_path,
             "file_size_bytes": file_size,
             "mime_type": file.content_type,
-            "title": title or file.filename,
+            "title": title,
             "one_line_summary": summaries.get("one_line"),
             "brief_summary": summaries.get("brief"),
             "uploaded_by": admin.get("id"),
@@ -271,6 +317,26 @@ async def upload_note(
             chunks=chunk_data,
             embeddings=embeddings
         )
+        
+        # Check if this is the first note for this unit and update unit name
+        existing_notes = client.table("notes").select("id").eq("unit_id", unit_id).is_("deleted_at", "null").execute()
+        if len(existing_notes.data or []) == 1:  # This is the first note
+            try:
+                # Generate AI unit name from the note content
+                unit_name_prompt = f"""Based on this academic document content from Unit {unit_number} of {subject_name}, 
+generate a short descriptive name (3-5 words) for this unit topic.
+
+Document content:
+{full_text[:2000]}
+
+Respond with ONLY the unit name, nothing else. Make it academic and descriptive."""
+                
+                unit_name = rag_engine.generate_text(unit_name_prompt)
+                if unit_name and len(unit_name) < 100:
+                    client.table("subject_units").update({"name": unit_name.strip()}).eq("id", unit_id).execute()
+                    logger.info(f"Updated unit name to: {unit_name.strip()}")
+            except Exception as e:
+                logger.warning(f"Failed to generate AI unit name: {e}")
         
         logger.info(f"Uploaded note: {file.filename} -> {unique_filename} ({chunks_added} chunks)")
         

@@ -29,7 +29,7 @@ class NotesRAGEngine:
     
     def __init__(self):
         self.embedding_model_name = "models/text-embedding-004"
-        self.generation_model_name = settings.gemini_model
+        self.generation_model_name = "gemini-2.0-flash"
         self._generation_model = None
     
     @property
@@ -191,10 +191,10 @@ Provide a helpful, educational response based on the notes content above.
             response = chat.send_message(
                 f"{system_prompt}\n\n{prompt}",
                 safety_settings={
-                    "HARASSMENT": "BLOCK_NONE",
-                    "HATE_SPEECH": "BLOCK_NONE",
-                    "SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                    "DANGEROUS_CONTENT": "BLOCK_NONE",
+                    "harm_category_harassment": "block_none",
+                    "harm_category_hate_speech": "block_none",
+                    "harm_category_sexually_explicit": "block_none",
+                    "harm_category_dangerous_content": "block_none",
                 }
             )
             return response.text
@@ -325,10 +325,10 @@ Provide a helpful, educational response based on the notes content above.
                 f"{system_prompt}\n\n{prompt}",
                 stream=True,
                 safety_settings={
-                    "HARASSMENT": "BLOCK_NONE",
-                    "HATE_SPEECH": "BLOCK_NONE",
-                    "SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                    "DANGEROUS_CONTENT": "BLOCK_NONE",
+                    "harm_category_harassment": "block_none",
+                    "harm_category_hate_speech": "block_none",
+                    "harm_category_sexually_explicit": "block_none",
+                    "harm_category_dangerous_content": "block_none",
                 }
             )
             
@@ -349,10 +349,12 @@ Provide a helpful, educational response based on the notes content above.
             })
             
         except Exception as e:
+            import traceback
             logger.error(f"Error in streaming response: {e}")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             yield json.dumps({
                 "type": "error",
-                "data": "Error generating response. Please try again."
+                "data": f"Error generating response: {str(e)}"
             })
 
 

@@ -63,6 +63,7 @@ class QueryProcessor:
         "od": "on duty",
         "cl": "casual leave",
         "ml": "medical leave",
+        "pl": "previledged leave",
 
         # Facilities
         "lib": "library",
@@ -104,6 +105,7 @@ class QueryProcessor:
         "it": "information technology",
         "aids": "artificial intelligence data science",
         "aiml": "artificial intelligence machine learning",
+        "ads": "artificial intelligence data science",
 
         # Misc
         "timetable": "time table schedule",
