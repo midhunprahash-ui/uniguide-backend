@@ -46,11 +46,10 @@ async def list_years(
     """List all years, optionally filtered by department or stream. Accessible by anyone."""
     client = get_supabase_admin_client()
 
-    # Get user's org or default to sjit for anonymous users
+    # Use cached org_id and role from auth (no redundant profile query)
     if user:
-        profile = client.table("profiles").select("org_id, role").eq("id", user["id"]).single().execute()
-        org_id = profile.data.get("org_id") if profile.data else None
-        is_admin = profile.data.get("role") in ["admin", "superadmin"] if profile.data else False
+        org_id = user.get("org_id")
+        is_admin = user.get("role") in ["admin", "superadmin"]
     else:
         # Anonymous user - get default org
         org = client.table("organizations").select("id").eq("slug", "sjit").single().execute()

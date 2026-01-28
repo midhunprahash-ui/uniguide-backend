@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import get_settings
 from routes import admin, chat, circular, categories, departments, organizations, streams, years, health
 from routes import subjects, notes_admin, notes_chat  # Notes RAG
+from routes import deadlines  # Smart Calendar & Deadline Assassin
 from services.rate_limiter import limiter
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -103,6 +104,7 @@ app.include_router(health.router, tags=["Health"])
 app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
 app.include_router(circular.router, prefix="/api/circular", tags=["Circular"])
+app.include_router(deadlines.router, prefix="/api/deadlines", tags=["Deadlines"])
 app.include_router(categories.router, prefix="/api/categories", tags=["Categories"])
 app.include_router(departments.router, prefix="/api/departments", tags=["Departments"])
 app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])

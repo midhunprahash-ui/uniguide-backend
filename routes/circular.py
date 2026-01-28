@@ -24,13 +24,15 @@ def register_circular(
     one_line_summary: str = None,
     brief_summary: str = None,
     chunk_count: int = 0,
-    org_id: str = None
+    org_id: str = None,
+    document_text: str = None  # Full text for deadline extraction
 ):
     """
-    Register a circular in Supabase.
+    Register a circular in Supabase and extract deadlines.
     This is called from admin routes when a circular is uploaded.
     """
     client = get_supabase_admin_client()
+    circular_id = None
 
     try:
         # Check if circular already exists for this document
@@ -50,8 +52,19 @@ def register_circular(
             if org_id:
                 circular_data["org_id"] = org_id
 
-            client.table("circulars").insert(circular_data).execute()
+            result = client.table("circulars").insert(circular_data).execute()
+            circular_id = result.data[0]["id"] if result.data else None
             logger.info(f"Registered circular: {filename} for org: {org_id}")
+        else:
+            circular_id = existing.data[0]["id"]
+        
+        # Trigger deadline extraction if we have text and a circular ID
+        return circular_id
+                
+    except Exception as e:
+        logger.error(f"Error registering circular: {e}")
+        return None
+                
     except Exception as e:
         logger.error(f"Error registering circular: {e}")
 

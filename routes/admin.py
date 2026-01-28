@@ -335,14 +335,37 @@ async def upload_document(
                 }).eq("id", document_id).execute()
 
                 # Create circular entry with org_id
-                client.table("circulars").insert({
-                    "document_id": document_id,
-                    "org_id": org_id,  # Add org_id for multi-tenant isolation
-                    "title": file.filename,
-                    "one_line_summary": summaries["one_line"],
-                    "brief_summary": summaries["brief"],
-                    "is_active": True
-                }).execute()
+                # Register circular using the helper function (which also triggers deadline extraction)
+                from routes.circular import register_circular
+                circular_id = register_circular(
+                    doc_id=document_id,
+                    filename=file.filename,
+                    year=year,
+                    department=department,
+                    upload_date=doc_result.data["created_at"],
+                    one_line_summary=summaries["one_line"],
+                    brief_summary=summaries["brief"],
+                    chunk_count=result.get("chunks", 0),
+                    org_id=org_id,
+                    document_text=extracted_text
+                )
+        
+        # Extract deadlines from ANY document that has text
+        # This covers circulars, notifications, schedules, etc.
+        if result.get("extracted_text"):
+            try:
+                from routes.deadlines import register_deadlines_from_document
+                # Use circular_id if we have one (from above), otherwise None
+                cid = circular_id if category == "circulars" and 'circular_id' in locals() else None
+                
+                register_deadlines_from_document(
+                    document_id=document_id,
+                    document_text=result["extracted_text"],
+                    org_id=org_id,
+                    circular_id=cid
+                )
+            except Exception as e:
+                logger.warning(f"Failed to extract deadlines from document: {e}")
 
         # Clean up local file (it's now in Supabase Storage)
         if os.path.exists(file_path):

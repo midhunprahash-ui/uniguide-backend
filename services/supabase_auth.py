@@ -17,14 +17,14 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(security)
 ) -> dict | None:
     """
-    Verify Supabase JWT and return user data.
+    Verify Supabase JWT and return user data including profile info.
     Returns None if no token provided (for anonymous access).
 
     Args:
         credentials: Bearer token from Authorization header
 
     Returns:
-        User data dict or None for anonymous
+        User data dict with org_id and role, or None for anonymous
 
     Raises:
         HTTPException: If token is invalid
@@ -45,10 +45,21 @@ async def get_current_user(
             )
 
         user = user_response.user
+        
+        # Fetch profile data once during auth (eliminates redundant queries in routes)
+        try:
+            profile = client.table("profiles").select("org_id, role").eq("id", str(user.id)).single().execute()
+            profile_data = profile.data or {}
+        except Exception as e:
+            logger.warning(f"Could not fetch profile for user {user.id}: {e}")
+            profile_data = {}
+        
         return {
             "id": str(user.id),
             "email": user.email,
-            "user_metadata": user.user_metadata
+            "user_metadata": user.user_metadata,
+            "org_id": profile_data.get("org_id"),
+            "role": profile_data.get("role", "student")
         }
     except HTTPException:
         raise
@@ -107,28 +118,28 @@ async def require_admin(
     Require admin or superadmin role.
 
     Returns:
-        User data dict with role and org_id
+        User data dict with role and org_id (already cached from auth)
 
     Raises:
         HTTPException: If not admin
     """
-    user_id = user.get("id")
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User ID not found"
-        )
-
-    # Fetch role and org_id from profile
-    client = get_supabase_admin_client()
-    try:
-        result = client.table("profiles").select("role, org_id").eq("id", user_id).single().execute()
-        role = result.data.get("role", "student") if result.data else "student"
-        org_id = result.data.get("org_id") if result.data else None
-    except Exception as e:
-        logger.error(f"Error getting user profile: {e}")
-        role = "student"
-        org_id = None
+    # org_id and role are now already in user dict from get_current_user
+    role = user.get("role", "student")
+    org_id = user.get("org_id")
+    
+    # Fallback: only query if role/org_id missing (shouldn't happen normally)
+    if not role or not org_id:
+        user_id = user.get("id")
+        if user_id:
+            client = get_supabase_admin_client()
+            try:
+                result = client.table("profiles").select("role, org_id").eq("id", user_id).single().execute()
+                role = result.data.get("role", "student") if result.data else "student"
+                org_id = result.data.get("org_id") if result.data else None
+            except Exception as e:
+                logger.error(f"Error getting user profile: {e}")
+                role = "student"
+                org_id = None
 
     if role not in ["admin", "superadmin"]:
         raise HTTPException(

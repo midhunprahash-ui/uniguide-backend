@@ -136,7 +136,7 @@ async def list_subjects_with_stats(
 ):
     """
     List subjects with unit counts and notes statistics.
-    This is an optimized endpoint that returns all data in a single query.
+    OPTIMIZED: Uses single RPC call instead of 6+ separate queries.
     Supports both authenticated and anonymous users.
     """
     client = get_supabase_admin_client()
@@ -155,92 +155,16 @@ async def list_subjects_with_stats(
     if not org_id:
         raise HTTPException(status_code=404, detail="Organization not found")
     
-    # Build query for subjects
-    query = client.table("subjects").select("*").eq("org_id", org_id).order("sort_order")
+    # OPTIMIZED: Single RPC call replaces 6+ separate queries
+    result = client.rpc("get_subjects_with_stats", {
+        "p_org_id": org_id,
+        "p_year_id": year_id,
+        "p_semester": semester,
+        "p_include_inactive": is_admin
+    }).execute()
     
-    if year_id:
-        query = query.eq("year_id", year_id)
-    
-    if semester:
-        query = query.eq("semester", semester)
-    
-    # Only admins can see inactive subjects
-    if not is_admin:
-        query = query.eq("is_active", True)
-    
-    subjects_result = query.execute()
-    subjects = subjects_result.data or []
-    
-    if not subjects:
-        return []
-    
-    # Get all subject IDs and year IDs
-    subject_ids = [s["id"] for s in subjects]
-    year_ids = list(set(s["year_id"] for s in subjects))
-    
-    # Get years with department info
-    years_result = client.table("years").select("id, year_number, department_id").in_("id", year_ids).execute()
-    years_data = {y["id"]: y for y in (years_result.data or [])}
-    
-    # Get department IDs and fetch departments with stream info
-    dept_ids = list(set(y["department_id"] for y in years_data.values()))
-    depts_result = client.table("departments").select("id, name, code, stream_id").in_("id", dept_ids).execute()
-    depts_data = {d["id"]: d for d in (depts_result.data or [])}
-    
-    # Get stream IDs and fetch streams
-    stream_ids = list(set(d["stream_id"] for d in depts_data.values()))
-    streams_result = client.table("streams").select("id, name, code").in_("id", stream_ids).execute()
-    streams_data = {s["id"]: s for s in (streams_result.data or [])}
-    
-    # Get all units for these subjects in one query
-    units_result = client.table("subject_units").select("id, subject_id").in_("subject_id", subject_ids).execute()
-    units = units_result.data or []
-    
-    # Get all unit IDs
-    unit_ids = [u["id"] for u in units]
-    
-    # Get note counts per unit in one query (only count non-deleted notes)
-    notes_count_per_unit = {}
-    if unit_ids:
-        notes_result = client.table("notes").select("unit_id").in_("unit_id", unit_ids).is_("deleted_at", "null").execute()
-        notes = notes_result.data or []
-        for note in notes:
-            unit_id = note["unit_id"]
-            notes_count_per_unit[unit_id] = notes_count_per_unit.get(unit_id, 0) + 1
-    
-    # Build unit count and units_with_notes per subject
-    subject_stats = {}
-    for unit in units:
-        subject_id = unit["subject_id"]
-        if subject_id not in subject_stats:
-            subject_stats[subject_id] = {"total_units": 0, "units_with_notes": 0}
-        subject_stats[subject_id]["total_units"] += 1
-        if notes_count_per_unit.get(unit["id"], 0) > 0:
-            subject_stats[subject_id]["units_with_notes"] += 1
-    
-    # Combine subjects with stats and hierarchy info
-    result = []
-    for subject in subjects:
-        stats = subject_stats.get(subject["id"], {"total_units": subject.get("unit_count", 0), "units_with_notes": 0})
-        
-        # Get hierarchy info
-        year_info = years_data.get(subject["year_id"], {})
-        dept_info = depts_data.get(year_info.get("department_id"), {})
-        stream_info = streams_data.get(dept_info.get("stream_id"), {})
-        
-        result.append({
-            **subject,
-            "total_units": stats["total_units"],
-            "units_with_notes": stats["units_with_notes"],
-            # Hierarchy info
-            "year_number": year_info.get("year_number"),
-            "department_name": dept_info.get("name"),
-            "department_code": dept_info.get("code"),
-            "stream_name": stream_info.get("name"),
-            "stream_code": stream_info.get("code"),
-        })
-    
-    return result
+    return result.data or []
+
 
 
 @router.get("/{subject_id}", response_model=SubjectWithUnitsResponse)
@@ -421,6 +345,7 @@ async def list_units(
 ):
     """
     List all units for a subject with notes count.
+    OPTIMIZED: Uses single RPC call instead of 3 separate queries.
     Supports both authenticated and anonymous users.
     """
     client = get_supabase_admin_client()
@@ -430,51 +355,27 @@ async def list_units(
         profile = client.table("profiles").select("org_id").eq("id", user["id"]).single().execute()
         org_id = profile.data.get("org_id") if profile.data else None
     else:
-        # Anonymous user - get org from subject itself to be safe, or default
-        # Since we have subject_id, we can just check if subject exists and get its org_id
-        # But for security context (if we had strict tenant isolation per request domain), 
-        # we should use the default org logic.
+        # Anonymous user - use default org
         org = client.table("organizations").select("id").eq("slug", "sjit").single().execute()
         org_id = org.data.get("id") if org.data else None
     
     if not org_id:
         raise HTTPException(status_code=404, detail="Organization not found")
     
-    # Verify subject belongs to user's org (or default org)
-    subject = client.table("subjects").select("id").eq("id", subject_id).eq("org_id", org_id).single().execute()
-    if not subject.data:
+    # OPTIMIZED: Single RPC call replaces 3 separate queries
+    # (subject verification, units fetch, notes count aggregation)
+    result = client.rpc("get_units_with_notes_count", {
+        "p_org_id": org_id,
+        "p_subject_id": subject_id,
+        "p_with_notes_only": with_notes_only
+    }).execute()
+    
+    # RPC returns empty array if subject not found
+    if not result.data:
         raise HTTPException(status_code=404, detail="Subject not found")
     
-    units_result = client.table("subject_units").select("*").eq("subject_id", subject_id).order("unit_number").execute()
-    units = units_result.data or []
-    
-    if not units:
-        return []
-    
-    # Get notes count for each unit
-    unit_ids = [u["id"] for u in units]
-    notes_result = client.table("notes").select("unit_id").in_("unit_id", unit_ids).is_("deleted_at", "null").execute()
-    notes = notes_result.data or []
-    
-    # Count notes per unit
-    notes_count_per_unit = {}
-    for note in notes:
-        unit_id = note["unit_id"]
-        notes_count_per_unit[unit_id] = notes_count_per_unit.get(unit_id, 0) + 1
-    
-    # Add notes_count to each unit
-    result = []
-    for unit in units:
-        notes_count = notes_count_per_unit.get(unit["id"], 0)
-        # Filter if with_notes_only is True
-        if with_notes_only and notes_count == 0:
-            continue
-        result.append({
-            **unit,
-            "notes_count": notes_count
-        })
-    
-    return result
+    return result.data
+
 
 
 @router.put("/{subject_id}/units/{unit_id}", response_model=UnitResponse)

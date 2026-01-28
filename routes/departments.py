@@ -47,11 +47,10 @@ async def list_departments(
     """List departments for the current organization, optionally filtered by stream."""
     client = get_supabase_admin_client()
 
-    # Get user's organization
+    # Use cached org_id and role from auth (no redundant profile query)
     if user:
-        profile = client.table("profiles").select("org_id, role").eq("id", user["id"]).single().execute()
-        org_id = profile.data.get("org_id") if profile.data else None
-        is_admin = profile.data.get("role") in ["admin", "superadmin"] if profile.data else False
+        org_id = user.get("org_id")
+        is_admin = user.get("role") in ["admin", "superadmin"]
     else:
         # Anonymous user - get default org
         org = client.table("organizations").select("id").eq("slug", "sjit").single().execute()
@@ -84,8 +83,8 @@ async def create_department(
     """Create a new department (admin only). Requires stream_id."""
     client = get_supabase_admin_client()
 
-    profile = client.table("profiles").select("org_id").eq("id", admin["id"]).single().execute()
-    org_id = profile.data.get("org_id")
+    # Use cached org_id from require_admin (no redundant profile query)
+    org_id = admin.get("org_id")
 
     if not org_id:
         raise HTTPException(status_code=404, detail="Organization not found")
@@ -121,8 +120,8 @@ async def update_department(
     """Update a department (admin only)."""
     client = get_supabase_admin_client()
 
-    profile = client.table("profiles").select("org_id").eq("id", admin["id"]).single().execute()
-    org_id = profile.data.get("org_id")
+    # Use cached org_id from require_admin (no redundant profile query)
+    org_id = admin.get("org_id")
 
     existing = client.table("departments").select("*").eq("id", department_id).eq("org_id", org_id).single().execute()
     if not existing.data:
@@ -168,8 +167,8 @@ async def delete_department(
     """Delete a department (admin only). Also deletes associated years."""
     client = get_supabase_admin_client()
 
-    profile = client.table("profiles").select("org_id").eq("id", admin["id"]).single().execute()
-    org_id = profile.data.get("org_id")
+    # Use cached org_id from require_admin (no redundant profile query)
+    org_id = admin.get("org_id")
 
     existing = client.table("departments").select("*").eq("id", department_id).eq("org_id", org_id).single().execute()
     if not existing.data:
