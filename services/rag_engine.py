@@ -140,7 +140,7 @@ class RAGEngine:
     def generate_embedding(self, text: str) -> list[float]:
         """Generate embedding using Gemini API."""
         result = genai.embed_content(
-            model="models/text-embedding-004",
+            model="models/gemini-embedding-001",
             content=text,
             task_type="retrieval_document"
         )
@@ -149,7 +149,7 @@ class RAGEngine:
     def generate_query_embedding(self, query: str) -> list[float]:
         """Generate embedding for a query using Gemini API."""
         result = genai.embed_content(
-            model="models/text-embedding-004",
+            model="models/gemini-embedding-001",
             content=query,
             task_type="retrieval_query"
         )
@@ -941,7 +941,12 @@ Answer:"""
         # Generate streaming response
         response = self.generation_model.generate_content(prompt, stream=True)
         for chunk in response:
-            yield chunk.text
+            try:
+                if chunk.text:
+                    yield chunk.text
+            except ValueError:
+                # Skip chunks that don't have text (e.g., finish_reason without content)
+                continue
 
     def query_stream(
         self,

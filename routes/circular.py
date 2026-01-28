@@ -203,6 +203,14 @@ async def chat_about_circular(query: CircularChatQuery):
         # Get conversation history (limit to last 5 exchanges = 10 messages)
         history = session_manager.get_history(session_id, limit=10)
 
+        # Get default org_id for circular chat (uses sjit as default)
+        client = get_supabase_admin_client()
+        org = client.table("organizations").select("id").eq("slug", "sjit").single().execute()
+        org_id = org.data.get("id") if org.data else None
+
+        if not org_id:
+            raise HTTPException(status_code=500, detail="Could not determine organization")
+
         # Query RAG with circulars category filter
         result = rag_engine.query(
             question=query.question,
@@ -210,6 +218,7 @@ async def chat_about_circular(query: CircularChatQuery):
             year="all",  # Circulars apply to all years
             department="all",  # Circulars apply to all departments
             category="circulars",
+            org_id=org_id,
             conversation_history=history
         )
 

@@ -21,7 +21,7 @@ class DocumentProcessor:
         os.makedirs(settings.upload_directory, exist_ok=True)
         # Configure Gemini
         genai.configure(api_key=settings.gemini_api_key)
-        self.vision_model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        self.vision_model = genai.GenerativeModel("gemini-2.0-flash")
 
         # Initialize semantic chunker with optimized settings
         self.chunker = SemanticChunker(

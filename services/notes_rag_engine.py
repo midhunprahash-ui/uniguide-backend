@@ -28,7 +28,7 @@ class NotesRAGEngine:
     """
     
     def __init__(self):
-        self.embedding_model_name = "models/text-embedding-004"
+        self.embedding_model_name = "models/gemini-embedding-001"
         self.generation_model_name = "gemini-2.0-flash"
         self._generation_model = None
     

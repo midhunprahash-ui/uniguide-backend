@@ -275,7 +275,7 @@ async def upload_document(
         # Update document record with storage path and FK IDs
         client = get_supabase_admin_client()
         org_id = admin.get("org_id")
-        doc_result = client.table("documents").select("id").eq("filename", file.filename).eq("org_id", org_id).maybe_single().execute()
+        doc_result = client.table("documents").select("id, created_at").eq("filename", file.filename).eq("org_id", org_id).maybe_single().execute()
         if doc_result.data:
             document_id = doc_result.data["id"]
             
