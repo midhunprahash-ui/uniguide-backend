@@ -965,7 +965,19 @@ Answer:"""
         """
         import json
 
-        # Retrieve relevant context
+        # Step 1: Process query for intent detection (matches non-streaming query())
+        processed = query_processor.process(question)
+        category_name = self.get_category_name(category)
+
+        # Step 2: Handle conversational queries without retrieval
+        if processed.is_conversational:
+            response = self._handle_conversational(processed, category_name)
+            yield json.dumps({"type": "sources", "data": []})
+            yield json.dumps({"type": "token", "data": response["answer"]})
+            yield json.dumps({"type": "done", "data": ""})
+            return
+
+        # Step 3: Retrieve relevant context for actual questions
         context_chunks, sources = self.retrieve_context(question, stream, year, department, category, org_id)
 
         # Deduplicate sources
@@ -997,8 +1009,10 @@ Answer:"""
             return full_answer # Return for caller if needed (e.g. to save to history)
             
         except Exception as e:
-            print(f"Streaming error: {e}")
-            yield json.dumps({"type": "error", "data": "Error generating response."})
+            import traceback
+            logger.error(f"Streaming error: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            yield json.dumps({"type": "error", "data": f"Error generating response: {str(e)}"})
 
 # Singleton instance
 rag_engine = RAGEngine()

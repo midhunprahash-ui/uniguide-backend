@@ -99,8 +99,10 @@ async def query_chat_stream(request: Request, query: ChatQuery):
                 )
                 
             except Exception as e:
-                print(f"Stream error: {e}")
-                error_json = json.dumps({"type": "error", "data": "Error generating response."})
+                import traceback
+                logger.error(f"Stream error: {e}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                error_json = json.dumps({"type": "error", "data": f"Error: {str(e)}"})
                 yield f"data: {error_json}\n\n"
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
