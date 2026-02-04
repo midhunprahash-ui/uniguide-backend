@@ -19,6 +19,14 @@ class ChatResponse(BaseModel):
     sources: List[str]
     session_id: str
 
+
+class EventDiscoverQuery(BaseModel):
+    question: str
+    org_id: str
+    max_results: int = 40
+    nearby: bool = False
+    nearby_location: Optional[str] = None
+
 class AdminLogin(BaseModel):
     username: str
     password: str
@@ -91,4 +99,3 @@ class UpdateDocumentRequest(BaseModel):
     category: Optional[str] = None
     stream: Optional[str] = None
     semester: Optional[str] = None
-

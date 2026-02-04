@@ -12,6 +12,10 @@ services:
         value: "3.11.0"
       - key: GEMINI_API_KEY
         sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: EVENT_DISCOVERY_GEMINI_BUDGET
+        sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_ANON_KEY

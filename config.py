@@ -6,6 +6,8 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # API Keys
     gemini_api_key: str
+    tavily_api_key: str
+    event_discovery_gemini_budget: int = 3
 
     # Supabase Configuration
     supabase_url: str
@@ -33,4 +35,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings():
     return Settings()
-
