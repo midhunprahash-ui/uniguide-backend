@@ -26,6 +26,8 @@ class EventDiscoverQuery(BaseModel):
     max_results: int = 40
     nearby: bool = False
     nearby_location: Optional[str] = None
+    nearby_lat: Optional[float] = None
+    nearby_lng: Optional[float] = None
 
 class AdminLogin(BaseModel):
     username: str

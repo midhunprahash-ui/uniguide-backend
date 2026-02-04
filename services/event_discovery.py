@@ -606,6 +606,8 @@ class EventDiscovery:
         max_results: int = 40,
         nearby: bool = False,
         nearby_location: str | None = None,
+        nearby_lat: float | None = None,
+        nearby_lng: float | None = None,
     ) -> Iterable[tuple[str, dict]]:
         search_query = self.build_search_query(question, nearby, nearby_location)
 

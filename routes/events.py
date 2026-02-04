@@ -29,6 +29,8 @@ async def discover_events_stream(request: Request, query: EventDiscoverQuery):
             query.org_id,
             query.nearby,
             query.nearby_location,
+            query.nearby_lat,
+            query.nearby_lng,
         )
 
         async def event_generator():
@@ -49,6 +51,8 @@ async def discover_events_stream(request: Request, query: EventDiscoverQuery):
                     max_results=max_results,
                     nearby=query.nearby,
                     nearby_location=query.nearby_location,
+                    nearby_lat=query.nearby_lat,
+                    nearby_lng=query.nearby_lng,
                 ):
                     if kind == "citation":
                         citations.append(data)
@@ -62,6 +66,8 @@ async def discover_events_stream(request: Request, query: EventDiscoverQuery):
                     query.org_id,
                     query.nearby,
                     query.nearby_location,
+                    query.nearby_lat,
+                    query.nearby_lng,
                     events=events,
                     citations=citations,
                 )
