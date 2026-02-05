@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
-from routes import admin, chat, circular, categories, departments, organizations, streams, years, health
+from routes import admin, chat, circular, categories, departments, organizations, streams, years, health, events
 from routes import subjects, notes_admin, notes_chat  # Notes RAG
 from routes import deadlines  # Smart Calendar & Deadline Assassin
 from services.rate_limiter import limiter
@@ -110,6 +110,7 @@ app.include_router(departments.router, prefix="/api/departments", tags=["Departm
 app.include_router(organizations.router, prefix="/api/organizations", tags=["Organizations"])
 app.include_router(streams.router, prefix="/api/streams", tags=["Streams"])
 app.include_router(years.router, prefix="/api/years", tags=["Years"])
+app.include_router(events.router, prefix="/api/events", tags=["Events"])
 
 # Notes RAG endpoints (isolated from institutional RAG)
 app.include_router(subjects.router, prefix="/api/subjects", tags=["Subjects"])
