@@ -378,7 +378,10 @@ async def upload_document(
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
         logger.error(f"Error processing document: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing document: {str(e)}")
+        detail = str(e)
+        if "No text could be extracted" in detail or "Poppler is not installed" in detail:
+            raise HTTPException(status_code=422, detail=detail)
+        raise HTTPException(status_code=500, detail=f"Error processing document: {detail}")
 
 
 @router.get("/upload-status/{job_id}")
