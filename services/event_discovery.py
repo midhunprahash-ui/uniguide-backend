@@ -8,6 +8,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import lru_cache
 from typing import Iterable, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -700,4 +701,10 @@ class EventDiscovery:
                     break
 
 
-event_discovery = EventDiscovery()
+@lru_cache
+def get_event_discovery() -> "EventDiscovery":
+    if not settings.tavily_api_key:
+        raise RuntimeError("TAVILY_API_KEY is not configured")
+    if TavilyClient is None:
+        raise RuntimeError("tavily-python is not installed")
+    return EventDiscovery()
