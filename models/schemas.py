@@ -29,6 +29,19 @@ class EventDiscoverQuery(BaseModel):
     nearby_lat: Optional[float] = None
     nearby_lng: Optional[float] = None
 
+class SaveEventRequest(BaseModel):
+    name: str
+    date: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    location: Optional[str] = None
+    cash_prize: Optional[str] = None
+    short_description: Optional[str] = None
+    url: Optional[str] = None
+    source_url: Optional[str] = None
+    status: Optional[str] = None
+    event_key: Optional[str] = None
+
 class AdminLogin(BaseModel):
     username: str
     password: str

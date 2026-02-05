@@ -122,7 +122,6 @@ ALLOWED_DOMAINS = [
     "kaggle.com",
     "codechef.com",
     "topcoder.com",
-    "github.com",
     # Research / Fellowships
     "daad.de",
     "mitacs.ca",
@@ -146,7 +145,6 @@ DOMAIN_WEIGHTS = {
     "kaggle.com": 3,
     "codechef.com": 3,
     "topcoder.com": 3,
-    "github.com": 2,
     "internshala.com": 3,
     "linkedin.com": 2,
     "wellfound.com": 2,
