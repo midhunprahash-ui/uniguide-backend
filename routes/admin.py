@@ -169,7 +169,11 @@ async def validate_token(request: Request, admin: dict = Depends(require_admin))
 
 @router.post("/upload-url")
 @limiter.limit(RATE_LIMITS["admin"], key_func=get_org_key)
-async def create_upload_url(payload: UploadUrlRequest, admin: dict = Depends(require_admin)):
+async def create_upload_url(
+    request: Request,
+    payload: UploadUrlRequest,
+    admin: dict = Depends(require_admin)
+):
     """
     Create a signed upload URL for direct-to-storage uploads.
     """
@@ -386,7 +390,11 @@ async def upload_document(
 
 @router.get("/upload-status/{job_id}")
 @limiter.limit(RATE_LIMITS["admin"], key_func=get_org_key)
-async def upload_status(job_id: str, admin: dict = Depends(require_admin)):
+async def upload_status(
+    request: Request,
+    job_id: str,
+    admin: dict = Depends(require_admin)
+):
     """
     Get upload job status for async processing.
     """
