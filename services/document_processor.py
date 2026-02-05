@@ -22,11 +22,7 @@ class DocumentProcessor:
         os.makedirs(settings.upload_directory, exist_ok=True)
         # Configure Gemini
         genai.configure(api_key=settings.gemini_api_key)
-        # Prefer newest, fall back for free-tier compatibility
-        self.vision_models = [
-            genai.GenerativeModel("gemini-2.0-flash"),
-            genai.GenerativeModel("gemini-1.5-flash"),
-        ]
+        self.vision_model = genai.GenerativeModel("gemini-2.5-flash")
 
         # Initialize semantic chunker with optimized settings
         self.chunker = SemanticChunker(
@@ -125,16 +121,13 @@ OUTPUT FORMAT:
 
 Extract everything now:"""
 
-        for model in self.vision_models:
-            try:
-                response = model.generate_content([prompt, image])
-                if response and getattr(response, "text", None):
-                    return response.text
-            except Exception as e:
-                model_name = getattr(model, "model_name", "unknown-model")
-                print(f"Error in Gemini Vision inference with {model_name}: {e}")
-                continue
-        return ""
+        try:
+            response = self.vision_model.generate_content([prompt, image])
+            return response.text
+        except Exception as e:
+            model_name = getattr(self.vision_model, "model_name", "unknown-model")
+            print(f"Error in Gemini Vision inference with {model_name}: {e}")
+            return ""
 
     def process_text(self, file_path: str) -> str:
         """Read text from plain text file."""
