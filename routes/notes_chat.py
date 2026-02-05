@@ -5,12 +5,12 @@ Isolated from institutional chat (routes/chat.py).
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 
-from services.auth import require_valid_org_id
+from services.auth import require_auth, require_org_membership, require_valid_org_id
 from services.chat_sessions import session_manager
 from services.notes_rag_engine import notes_rag_engine
 from services.rate_limiter import limiter, RATE_LIMITS, get_org_key
@@ -30,6 +30,7 @@ class NotesQuery(BaseModel):
     subject_id: Optional[str] = None
     unit_id: Optional[str] = None
     session_id: Optional[str] = None
+    context_key: Optional[str] = None
 
 
 class NotesResponse(BaseModel):
@@ -45,7 +46,11 @@ class NotesResponse(BaseModel):
 # ============================================================================
 
 @router.get("/session/{session_id}")
-async def get_notes_session_history(request: Request, session_id: str):
+async def get_notes_session_history(
+    request: Request,
+    session_id: str,
+    current_user: dict = Depends(require_auth),
+):
     """
     Get notes chat session with its message history.
     Used to restore notes chat after page refresh.
@@ -54,6 +59,9 @@ async def get_notes_session_history(request: Request, session_id: str):
     
     if not session_data:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    if session_data.get("user_id") != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="Access denied")
     
     return session_data
 
@@ -64,7 +72,11 @@ async def get_notes_session_history(request: Request, session_id: str):
 
 @router.post("/query-stream")
 @limiter.limit(RATE_LIMITS["chat"], key_func=get_org_key)
-async def query_notes_stream(request: Request, query: NotesQuery):
+async def query_notes_stream(
+    request: Request,
+    query: NotesQuery,
+    current_user: dict = Depends(require_auth),
+):
     """
     Stream notes chat response using Server-Sent Events (SSE).
     
@@ -73,15 +85,21 @@ async def query_notes_stream(request: Request, query: NotesQuery):
     try:
         # CRITICAL: Validate org_id
         require_valid_org_id(query.org_id)
+        require_org_membership(current_user.get("id"), query.org_id)
         
         # Get or create session
         session_id = query.session_id
         if not session_id or not session_manager.get_session(session_id):
+            context_key = query.context_key
+            if not context_key and query.subject_id:
+                context_key = f"note_{query.subject_id}_{query.unit_id or 'subject'}"
             session_id = session_manager.create_session(
                 category="notes",  # Special category for notes
                 year=query.year_id,
                 department=None,
-                org_id=query.org_id
+                org_id=query.org_id,
+                user_id=current_user.get("id"),
+                context_key=context_key,
             )
         
         # Store user question
@@ -136,7 +154,7 @@ async def query_notes_stream(request: Request, query: NotesQuery):
 
 @router.post("/query", response_model=NotesResponse)
 @limiter.limit(RATE_LIMITS["chat"], key_func=get_org_key)
-async def query_notes(request: Request, query: NotesQuery):
+async def query_notes(request: Request, query: NotesQuery, current_user: dict = Depends(require_auth)):
     """
     Query notes RAG (non-streaming).
     
@@ -145,15 +163,21 @@ async def query_notes(request: Request, query: NotesQuery):
     try:
         # CRITICAL: Validate org_id
         require_valid_org_id(query.org_id)
+        require_org_membership(current_user.get("id"), query.org_id)
         
         # Get or create session
         session_id = query.session_id
         if not session_id or not session_manager.get_session(session_id):
+            context_key = query.context_key
+            if not context_key and query.subject_id:
+                context_key = f"note_{query.subject_id}_{query.unit_id or 'subject'}"
             session_id = session_manager.create_session(
                 category="notes",
                 year=query.year_id,
                 department=None,
-                org_id=query.org_id
+                org_id=query.org_id,
+                user_id=current_user.get("id"),
+                context_key=context_key,
             )
         
         # Store user question
