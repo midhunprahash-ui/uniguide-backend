@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from models.schemas import EventDiscoverQuery, SaveEventRequest
-from services.auth import require_auth, require_valid_org_id
+from services.auth import require_auth, require_org_membership, require_valid_org_id
 from services.event_cache import event_cache
 from services.event_discovery import get_event_discovery
 from services.event_store import event_store
@@ -18,12 +18,17 @@ router = APIRouter()
 
 @router.post("/discover-stream")
 @limiter.limit(RATE_LIMITS["chat"], key_func=get_org_key)
-async def discover_events_stream(request: Request, query: EventDiscoverQuery):
+async def discover_events_stream(
+    request: Request,
+    query: EventDiscoverQuery,
+    current_user: dict = Depends(require_auth),
+):
     """
     Stream event discovery results using SSE.
     """
     try:
         require_valid_org_id(query.org_id)
+        require_org_membership(current_user.get("id"), query.org_id)
         max_results = max(1, min(query.max_results or 40, 60))
 
         cached = event_cache.get(

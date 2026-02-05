@@ -1,11 +1,11 @@
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from models.schemas import ChatQuery, ChatResponse
-from services.auth import require_valid_org_id
+from services.auth import require_auth, require_org_membership, require_valid_org_id
 from services.chat_sessions import session_manager
 from services.rag_engine import rag_engine
 from services.rate_limiter import limiter, RATE_LIMITS, get_org_key
@@ -16,7 +16,11 @@ router = APIRouter()
 
 @router.get("/session/{session_id}")
 @limiter.limit(RATE_LIMITS["public"])
-async def get_session_history(request: Request, session_id: str):
+async def get_session_history(
+    request: Request,
+    session_id: str,
+    current_user: dict = Depends(require_auth),
+):
     """
     Get chat session with its message history.
     Used to restore chat after page refresh.
@@ -25,13 +29,16 @@ async def get_session_history(request: Request, session_id: str):
     
     if not session_data:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    if session_data.get("user_id") != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="Access denied")
     
     return session_data
 
 
 @router.post("/query-stream")
 @limiter.limit(RATE_LIMITS["chat"], key_func=get_org_key)
-async def query_chat_stream(request: Request, query: ChatQuery):
+async def query_chat_stream(request: Request, query: ChatQuery, current_user: dict = Depends(require_auth)):
     """
     Stream chat response using Server-Sent Events (SSE).
 
@@ -40,6 +47,7 @@ async def query_chat_stream(request: Request, query: ChatQuery):
     try:
         # CRITICAL: Validate org_id to prevent tenant isolation bypass
         require_valid_org_id(query.org_id)
+        require_org_membership(current_user.get("id"), query.org_id)
 
         # Get or create session
         session_id = query.session_id
@@ -48,7 +56,8 @@ async def query_chat_stream(request: Request, query: ChatQuery):
                 category=query.category,
                 year=query.year,
                 department=query.department,
-                org_id=query.org_id
+                org_id=query.org_id,
+                user_id=current_user.get("id"),
             )
 
         # Store user question in session
@@ -113,7 +122,7 @@ async def query_chat_stream(request: Request, query: ChatQuery):
 
 @router.post("/query", response_model=ChatResponse)
 @limiter.limit(RATE_LIMITS["chat"], key_func=get_org_key)
-async def query_chat(request: Request, query: ChatQuery):
+async def query_chat(request: Request, query: ChatQuery, current_user: dict = Depends(require_auth)):
     """
     Student chat endpoint to query the RAG system with conversation history.
 
@@ -128,6 +137,7 @@ async def query_chat(request: Request, query: ChatQuery):
     try:
         # CRITICAL: Validate org_id to prevent tenant isolation bypass
         require_valid_org_id(query.org_id)
+        require_org_membership(current_user.get("id"), query.org_id)
 
         # Get or create session
         session_id = query.session_id
@@ -136,7 +146,8 @@ async def query_chat(request: Request, query: ChatQuery):
                 category=query.category,
                 year=query.year,
                 department=query.department,
-                org_id=query.org_id
+                org_id=query.org_id,
+                user_id=current_user.get("id"),
             )
 
         # Store user question in session
