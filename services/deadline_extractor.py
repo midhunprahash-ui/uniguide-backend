@@ -234,8 +234,8 @@ class DeadlineExtractor:
         self.model = None
         if GEMINI_API_KEY:
             try:
-                self.model = genai.GenerativeModel('gemini-2.0-flash')
-                logger.info("DeadlineExtractor initialized with Gemini 2.0 Flash")
+                self.model = genai.GenerativeModel('gemini-2.5-flash')
+                logger.info("DeadlineExtractor initialized with Gemini 2.5 Flash")
             except Exception as e:
                 logger.error(f"Failed to initialize Gemini model: {e}")
     

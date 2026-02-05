@@ -8,17 +8,8 @@ import shutil
 import uuid as uuid_module
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-
-
-def is_valid_uuid(val: str | None) -> bool:
-    """Check if a string is a valid UUID."""
-    if not val:
-        return False
-    try:
-        uuid_module.UUID(val)
-        return True
-    except (ValueError, TypeError):
-        return False
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from config import get_settings
 from models.schemas import (
@@ -32,6 +23,10 @@ from models.schemas import (
     Token,
     UpdateDocumentRequest,
 )
+from services.admin_stats import refresh_document_stats
+from services.upload_pipeline import process_upload_payload
+from services.upload_queue import enqueue_upload, get_upload_status
+from services import supabase_storage
 from services.document_processor import document_processor
 from services.supabase_auth import require_admin
 from services.supabase_client import get_supabase_admin_client
@@ -43,18 +38,31 @@ router = APIRouter()
 settings = get_settings()
 
 
-def refresh_document_stats():
-    """
-    Refresh the admin_document_stats materialized view.
-    Call after document upload, delete, or restore to keep stats current.
-    """
+def is_valid_uuid(val: str | None) -> bool:
+    """Check if a string is a valid UUID."""
+    if not val:
+        return False
     try:
-        client = get_supabase_admin_client()
-        client.rpc("refresh_admin_document_stats", {}).execute()
-        logger.debug("Refreshed admin_document_stats materialized view")
-    except Exception as e:
-        # Log but don't fail the operation - stats will catch up on next refresh
-        logger.warning(f"Failed to refresh admin_document_stats: {e}")
+        uuid_module.UUID(val)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+class UploadUrlRequest(BaseModel):
+    filename: str
+    category: str
+    content_type: str | None = None
+    file_size_bytes: int | None = None
+
+
+def _sanitize_filename(filename: str) -> str:
+    safe = "".join(c for c in filename if c.isalnum() or c in {".", "-", "_"})
+    return safe or "document"
+
+
+def _extract_file_ext(filename: str) -> str:
+    return filename.split(".")[-1].lower() if "." in filename else ""
 
 
 def get_document_registry() -> dict:
@@ -159,18 +167,69 @@ async def validate_token(request: Request, admin: dict = Depends(require_admin))
     }
 
 
+@router.post("/upload-url")
+@limiter.limit(RATE_LIMITS["admin"], key_func=get_org_key)
+async def create_upload_url(
+    request: Request,
+    payload: UploadUrlRequest,
+    admin: dict = Depends(require_admin)
+):
+    """
+    Create a signed upload URL for direct-to-storage uploads.
+    """
+    org_id = admin.get("org_id")
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User has no organization")
+
+    bucket = supabase_storage.get_bucket_for_category(payload.category)
+    safe_name = _sanitize_filename(payload.filename)
+    path = f"{org_id}/{uuid_module.uuid4()}-{safe_name}"
+
+    client = get_supabase_admin_client()
+    try:
+        signed = client.storage.from_(bucket).create_signed_upload_url(path)
+    except Exception as e:
+        logger.error(f"Failed to create signed upload URL: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create upload URL")
+
+    signed_url = None
+    token = None
+    if isinstance(signed, dict):
+        signed_url = signed.get("signed_url") or signed.get("signedUrl") or signed.get("signedURL")
+        token = signed.get("token")
+    else:
+        signed_url = getattr(signed, "signed_url", None) or getattr(signed, "signedUrl", None)
+        token = getattr(signed, "token", None)
+
+    if not signed_url:
+        raise HTTPException(status_code=500, detail="Signed upload URL not returned by storage")
+
+    return {
+        "bucket": bucket,
+        "path": path,
+        "storage_path": f"{bucket}/{path}",
+        "signed_url": signed_url,
+        "token": token,
+    }
+
+
 
 @router.post("/upload")
 @limiter.limit(RATE_LIMITS["upload"], key_func=get_org_key)
 async def upload_document(
     request: Request,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
     year: str = Form(...),
     department: str = Form(...),
     category: str = Form(...),
     stream: str = Form("all"),
     semester: str = Form("all"),
     summary: str | None = Form(None),
+    storage_path: str | None = Form(None),
+    original_filename: str | None = Form(None),
+    file_size_bytes: int | None = Form(None),
+    mime_type: str | None = Form(None),
+    process_async: bool = Form(False),
     # FK-based IDs (optional, will be looked up from codes if not provided)
     stream_id: str | None = Form(None),
     department_id: str | None = Form(None),
@@ -192,8 +251,6 @@ async def upload_document(
     Returns:
         Document metadata
     """
-    from services import supabase_storage
-    
     # Validate FK IDs - if not valid UUIDs, set to None to trigger code-based resolution
     if not is_valid_uuid(stream_id):
         stream_id = None
@@ -203,9 +260,16 @@ async def upload_document(
         year_id = None
 
     
+    if not file and not storage_path:
+        raise HTTPException(status_code=400, detail="file or storage_path is required")
+
+    filename = original_filename or (file.filename if file else None)
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename is required")
+
     # Validate file type
     allowed_extensions = ['pdf', 'png', 'jpg', 'jpeg', 'txt']
-    file_ext = file.filename.split('.')[-1].lower()
+    file_ext = _extract_file_ext(filename)
 
     if file_ext not in allowed_extensions:
         raise HTTPException(
@@ -228,11 +292,11 @@ async def upload_document(
     # Check for duplicate filename in active documents for this org
     org_id = admin.get("org_id")
     try:
-        existing_doc = db_client.table("documents").select("id, filename").eq("filename", file.filename).eq("org_id", org_id).execute()
+        existing_doc = db_client.table("documents").select("id, filename").eq("filename", filename).eq("org_id", org_id).execute()
         if existing_doc.data and len(existing_doc.data) > 0:
             raise HTTPException(
                 status_code=400,
-                detail=f"Document '{file.filename}' already exists. Delete it first or rename your file."
+                detail=f"Document '{filename}' already exists. Delete it first or rename your file."
             )
     except HTTPException:
         raise
@@ -244,144 +308,100 @@ async def upload_document(
     # The stream parameter reflects which streams the selected departments belong to
     # No additional validation needed here as frontend handles the logic
 
-    # Save file temporarily for processing
+    # Save file temporarily for processing (if file uploaded via backend)
     os.makedirs(settings.upload_directory, exist_ok=True)
-    file_path = os.path.join(settings.upload_directory, file.filename)
+    file_path = os.path.join(settings.upload_directory, filename) if file else None
 
     try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        if file and file_path:
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
 
-        # Process and store document (creates embeddings in DB)
-        result = document_processor.process_and_store_document(
-            file_path=file_path,
-            filename=file.filename,
-            year=year,
-            department=department,
-            category=category,
-            file_type=file_ext,
-            org_id=admin.get("org_id"),
-            stream=stream,
-            semester=semester
-        )
+        # Decide async vs sync
+        threshold_mb = int(os.getenv("UPLOAD_ASYNC_THRESHOLD_MB", "10"))
+        threshold_bytes = threshold_mb * 1024 * 1024
+        payload_size = file_size_bytes
+        if payload_size is None and file_path and os.path.exists(file_path):
+            payload_size = os.path.getsize(file_path)
+        resolved_mime_type = mime_type or (file.content_type if file else None)
 
-        # Upload file to Supabase Storage for permanent storage
-        storage_path = supabase_storage.upload_file(
-            file_path=file_path,
-            category=category,
-            filename=file.filename
-        )
+        should_async = process_async or (payload_size is not None and payload_size >= threshold_bytes)
 
-        # Update document record with storage path and FK IDs
-        client = get_supabase_admin_client()
-        org_id = admin.get("org_id")
-        doc_result = client.table("documents").select("id, created_at").eq("filename", file.filename).eq("org_id", org_id).maybe_single().execute()
-        if doc_result.data:
-            document_id = doc_result.data["id"]
-            
-            # Look up FK IDs from TEXT codes if not provided
-            resolved_stream_id = stream_id
-            resolved_department_id = department_id
-            resolved_year_id = year_id
-            
-            # Resolve stream_id from code
-            if not resolved_stream_id and stream and stream != 'all' and ',' not in stream:
-                stream_result = client.table("streams").select("id").eq("code", stream).eq("org_id", org_id).maybe_single().execute()
-                if stream_result.data:
-                    resolved_stream_id = stream_result.data["id"]
-            
-            # Resolve department_id from code
-            if not resolved_department_id and department and department != 'all' and ',' not in department:
-                dept_query = client.table("departments").select("id").eq("code", department).eq("org_id", org_id)
-                if resolved_stream_id:
-                    dept_query = dept_query.eq("stream_id", resolved_stream_id)
-                dept_result = dept_query.maybe_single().execute()
-                if dept_result.data:
-                    resolved_department_id = dept_result.data["id"]
-            
-            # Resolve year_id from code
-            if not resolved_year_id and year and year != 'all' and ',' not in year and resolved_department_id:
-                year_result = client.table("years").select("id").eq("code", year).eq("department_id", resolved_department_id).maybe_single().execute()
-                if year_result.data:
-                    resolved_year_id = year_result.data["id"]
-            
-            # Update document with storage path and FK IDs
-            update_data = {"storage_path": storage_path}
-            if resolved_stream_id:
-                update_data["stream_id"] = resolved_stream_id
-            if resolved_department_id:
-                update_data["department_id"] = resolved_department_id
-            if resolved_year_id:
-                update_data["year_id"] = resolved_year_id
-                
-            client.table("documents").update(update_data).eq("id", document_id).execute()
-            result["storage_path"] = storage_path
-            result["stream_id"] = resolved_stream_id
-            result["department_id"] = resolved_department_id
-            result["year_id"] = resolved_year_id
+        payload = {
+            "org_id": admin.get("org_id"),
+            "uploaded_by": admin.get("id"),
+            "file_path": file_path,
+            "storage_path": storage_path,
+            "original_filename": filename,
+            "file_ext": file_ext,
+            "file_size_bytes": payload_size,
+            "mime_type": resolved_mime_type,
+            "year": year,
+            "department": department,
+            "category": category,
+            "stream": stream,
+            "semester": semester,
+            "stream_id": stream_id,
+            "department_id": department_id,
+            "year_id": year_id,
+        }
 
-        # If it's a circular, generate summary and register it
-        if category == "circulars":
-            from services.rag_engine import rag_engine
-
-            extracted_text = result.get("extracted_text", "")
-            summaries = rag_engine.generate_circular_summary(extracted_text, file.filename)
-
-            if doc_result.data:
-                # Update document with summaries
-                client.table("documents").update({
-                    "one_line_summary": summaries["one_line"],
-                    "brief_summary": summaries["brief"]
-                }).eq("id", document_id).execute()
-
-                # Create circular entry with org_id
-                # Register circular using the helper function (which also triggers deadline extraction)
-                from routes.circular import register_circular
-                circular_id = register_circular(
-                    doc_id=document_id,
-                    filename=file.filename,
-                    year=year,
-                    department=department,
-                    upload_date=doc_result.data["created_at"],
-                    one_line_summary=summaries["one_line"],
-                    brief_summary=summaries["brief"],
-                    chunk_count=result.get("chunks", 0),
-                    org_id=org_id,
-                    document_text=extracted_text
+        if should_async:
+            # Ensure file is in storage for async processing
+            if file_path and not storage_path:
+                storage_path = supabase_storage.upload_file(
+                    file_path=file_path,
+                    category=category,
+                    filename=filename
                 )
-        
-        # Extract deadlines from ANY document that has text
-        # This covers circulars, notifications, schedules, etc.
-        if result.get("extracted_text"):
-            try:
-                from routes.deadlines import register_deadlines_from_document
-                # Use circular_id if we have one (from above), otherwise None
-                cid = circular_id if category == "circulars" and 'circular_id' in locals() else None
-                
-                register_deadlines_from_document(
-                    document_id=document_id,
-                    document_text=result["extracted_text"],
-                    org_id=org_id,
-                    circular_id=cid
-                )
-            except Exception as e:
-                logger.warning(f"Failed to extract deadlines from document: {e}")
+                payload["storage_path"] = storage_path
 
-        # Clean up local file (it's now in Supabase Storage)
-        if os.path.exists(file_path):
-            os.remove(file_path)
+            job_id = enqueue_upload(payload)
+            if not job_id:
+                # Queue not configured, fall back to sync
+                result = process_upload_payload(payload)
+                return result
 
-        # Refresh materialized view for updated stats
-        refresh_document_stats()
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
 
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "queued",
+                    "job_id": job_id,
+                    "filename": filename,
+                    "storage_path": storage_path,
+                },
+            )
+
+        result = process_upload_payload(payload)
         return result
 
     except Exception as e:
-        # Clean up file on error
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             os.remove(file_path)
         logger.error(f"Error processing document: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing document: {str(e)}")
+        detail = str(e)
+        if "No text could be extracted" in detail or "Poppler is not installed" in detail:
+            raise HTTPException(status_code=422, detail=detail)
+        raise HTTPException(status_code=500, detail=f"Error processing document: {detail}")
+
+
+@router.get("/upload-status/{job_id}")
+@limiter.limit(RATE_LIMITS["admin"], key_func=get_org_key)
+async def upload_status(
+    request: Request,
+    job_id: str,
+    admin: dict = Depends(require_admin)
+):
+    """
+    Get upload job status for async processing.
+    """
+    status = get_upload_status(job_id, admin.get("org_id"))
+    if status is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return status
 
 
 @router.get("/documents", response_model=list[DocumentMetadata])
@@ -1153,4 +1173,3 @@ async def health_check(admin: dict = Depends(require_admin)):
         "pending_documents": [{"id": d["id"], "filename": d["filename"]} for d in pending_docs],
         "failed_documents": [{"id": d["id"], "filename": d["filename"]} for d in failed_docs]
     }
-
