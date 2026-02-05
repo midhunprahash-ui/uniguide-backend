@@ -5,11 +5,19 @@ import os
 import logging
 from typing import Any
 
-from redis import Redis
-from rq import Queue
-from rq.job import Job
+try:
+    from redis import Redis
+    from rq import Queue
+    from rq.job import Job
 
-from services.upload_worker import process_upload_job
+    from services.upload_worker import process_upload_job
+    _RQ_AVAILABLE = True
+except Exception:
+    Redis = None
+    Queue = None
+    Job = None
+    process_upload_job = None
+    _RQ_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +27,9 @@ def _get_redis_url() -> str | None:
 
 
 def get_queue() -> Queue | None:
+    if not _RQ_AVAILABLE:
+        logger.warning("RQ/Redis not installed; upload queue disabled")
+        return None
     redis_url = _get_redis_url()
     if not redis_url:
         return None
