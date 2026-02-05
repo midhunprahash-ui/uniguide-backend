@@ -21,27 +21,3 @@ services:
         value: "3"
       - key: CORS_ORIGINS
         sync: false
-      - key: REDIS_URL
-        sync: false
-
-  - type: worker
-    name: uniguide-upload-worker
-    runtime: python
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m rq worker uploads
-    envVars:
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_ANON_KEY
-        sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
-      - key: TAVILY_API_KEY
-        sync: false
-      - key: EVENT_DISCOVERY_GEMINI_BUDGET
-        value: "3"
-      - key: REDIS_URL
-        sync: false
