@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from models.schemas import EventDiscoverQuery, SaveEventRequest
 from services.auth import require_auth, require_valid_org_id
 from services.event_cache import event_cache
-from services.event_discovery import event_discovery
+from services.event_discovery import get_event_discovery
 from services.event_store import event_store
 from services.event_utils import enrich_event_payload
 from services.rate_limiter import RATE_LIMITS, get_org_key, limiter
@@ -34,6 +34,10 @@ async def discover_events_stream(request: Request, query: EventDiscoverQuery):
             query.nearby_lat,
             query.nearby_lng,
         )
+        try:
+            discovery = get_event_discovery()
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=str(e))
 
         async def event_generator():
             try:
@@ -49,7 +53,7 @@ async def discover_events_stream(request: Request, query: EventDiscoverQuery):
                 citations: list[dict] = []
                 events: list[dict] = []
 
-                for kind, data in event_discovery.discover_stream(
+                for kind, data in discovery.discover_stream(
                     question=query.question,
                     max_results=max_results,
                     nearby=query.nearby,

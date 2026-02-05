@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # API Keys
     gemini_api_key: str
-    tavily_api_key: str
+    tavily_api_key: str | None = None
     event_discovery_gemini_budget: int = 3
 
     # Supabase Configuration
