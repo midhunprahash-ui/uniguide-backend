@@ -5,6 +5,7 @@ import uuid
 import google.generativeai as genai
 import pdfplumber
 from pdf2image import convert_from_path
+from pdf2image.exceptions import PDFInfoNotInstalledError
 from PIL import Image
 
 from config import get_settings
@@ -21,7 +22,7 @@ class DocumentProcessor:
         os.makedirs(settings.upload_directory, exist_ok=True)
         # Configure Gemini
         genai.configure(api_key=settings.gemini_api_key)
-        self.vision_model = genai.GenerativeModel("gemini-2.0-flash")
+        self.vision_model = genai.GenerativeModel("gemini-2.5-flash")
 
         # Initialize semantic chunker with optimized settings
         self.chunker = SemanticChunker(
@@ -43,17 +44,17 @@ class DocumentProcessor:
                     page_text = page.extract_text()
                     if page_text:
                         text += page_text + "\n\n"
-
-            # If text is sparse or empty, it might be a scanned PDF or complex table
-            # We can use a heuristic: if text length is low per page, try Vision
-            if len(text) < 100:
-                print("Low text content in PDF, attempting Vision extraction...")
-                text = self.process_pdf_with_vision(file_path)
-
-            return text
         except Exception as e:
-            print(f"Error processing PDF: {e}")
-            return self.process_pdf_with_vision(file_path)
+            print(f"Error processing PDF with pdfplumber: {e}")
+            text = ""
+
+        # If text is sparse or empty, it might be a scanned PDF or complex table
+        # Use a heuristic: if text length is low, try Vision
+        if len(text) < 100:
+            print("Low text content in PDF, attempting Vision extraction...")
+            text = self.process_pdf_with_vision(file_path)
+
+        return text
 
     def process_pdf_with_vision(self, file_path: str) -> str:
         """Extract text from PDF using Gemini Vision."""
@@ -66,6 +67,10 @@ class DocumentProcessor:
                 print(f"Processing page {i+1} with Gemini Vision...")
                 text += self.process_image_with_gemini(image) + "\n\n"
             return text
+        except PDFInfoNotInstalledError:
+            raise RuntimeError(
+                "Poppler is not installed. Install poppler-utils on Linux or `brew install poppler` on macOS."
+            )
         except Exception as e:
             print(f"Error in Vision processing for PDF: {e}")
             import traceback
@@ -85,8 +90,7 @@ class DocumentProcessor:
 
     def process_image_with_gemini(self, image: Image.Image) -> str:
         """Run Gemini Vision inference on a PIL Image."""
-        try:
-            prompt = """You are an expert at extracting structured information from academic documents.
+        prompt = """You are an expert at extracting structured information from academic documents.
 
 TASK: Extract ALL text and information from this document image.
 
@@ -117,10 +121,12 @@ OUTPUT FORMAT:
 
 Extract everything now:"""
 
+        try:
             response = self.vision_model.generate_content([prompt, image])
             return response.text
         except Exception as e:
-            print(f"Error in Gemini Vision inference: {e}")
+            model_name = getattr(self.vision_model, "model_name", "unknown-model")
+            print(f"Error in Gemini Vision inference with {model_name}: {e}")
             return ""
 
     def process_text(self, file_path: str) -> str:
@@ -290,4 +296,3 @@ Extract everything now:"""
 
 # Singleton instance
 document_processor = DocumentProcessor()
-

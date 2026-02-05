@@ -31,7 +31,8 @@ class SupabaseChatSessionManager:
         year: str = "all",
         department: str = "all",
         org_id: str = None,
-        user_id: str = None
+        user_id: str = None,
+        context_key: str | None = None
     ) -> str:
         """Create a new chat session and return its ID.
 
@@ -49,7 +50,7 @@ class SupabaseChatSessionManager:
             logger.warning("No org_id provided for chat session - session will not be org-scoped")
 
         try:
-            self.client.table("chat_sessions").insert({
+            payload = {
                 "id": session_id,
                 "org_id": org_id,
                 "user_id": user_id,
@@ -57,12 +58,36 @@ class SupabaseChatSessionManager:
                 "year": year,
                 "department": department,
                 "updated_at": datetime.now().isoformat()
-            }).execute()
+            }
+            if context_key:
+                payload["context_key"] = context_key
+
+            self.client.table("chat_sessions").insert(payload).execute()
 
             logger.info(f"Created new chat session: {session_id} for org: {org_id}")
             return session_id
 
         except Exception as e:
+            if context_key:
+                try:
+                    fallback_payload = {
+                        "id": session_id,
+                        "org_id": org_id,
+                        "user_id": user_id,
+                        "category": category,
+                        "year": year,
+                        "department": department,
+                        "updated_at": datetime.now().isoformat()
+                    }
+                    self.client.table("chat_sessions").insert(fallback_payload).execute()
+                    logger.warning(
+                        "Created session without context_key (migration missing?): %s",
+                        session_id
+                    )
+                    return session_id
+                except Exception as fallback_error:
+                    logger.error(f"Error creating session fallback: {fallback_error}")
+
             logger.error(f"Error creating session: {e}")
             # Fallback to UUID for now
             return session_id
@@ -143,6 +168,43 @@ class SupabaseChatSessionManager:
             **session,
             "messages": history
         }
+
+    def list_sessions_for_user(
+        self,
+        user_id: str,
+        org_id: str,
+        limit: int = 100
+    ) -> list[dict]:
+        """List recent sessions for a user within an org."""
+        try:
+            result = (
+                self.client.table("chat_sessions")
+                .select("id, category, context_key, updated_at")
+                .eq("user_id", user_id)
+                .eq("org_id", org_id)
+                .is_("deleted_at", None)
+                .order("updated_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            return result.data or []
+        except Exception as e:
+            logger.warning(f"Error listing sessions with context_key: {e}")
+            try:
+                result = (
+                    self.client.table("chat_sessions")
+                    .select("id, category, updated_at")
+                    .eq("user_id", user_id)
+                    .eq("org_id", org_id)
+                    .is_("deleted_at", None)
+                    .order("updated_at", desc=True)
+                    .limit(limit)
+                    .execute()
+                )
+                return result.data or []
+            except Exception as fallback_error:
+                logger.error(f"Error listing sessions fallback: {fallback_error}")
+                return []
 
 
 # Global session manager instance

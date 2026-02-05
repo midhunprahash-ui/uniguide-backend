@@ -266,3 +266,36 @@ def require_valid_org_id(org_id: str) -> str:
         )
 
     return org_id
+
+
+def get_user_org_id(user_id: str) -> str | None:
+    """Fetch the org_id for a given user from profiles."""
+    try:
+        client = get_supabase_client()
+        result = client.table("profiles").select("org_id").eq("id", user_id).single().execute()
+        if result.data:
+            return result.data.get("org_id")
+    except Exception as e:
+        logger.error(f"Error fetching org_id for user {user_id}: {e}")
+    return None
+
+
+def require_org_membership(user_id: str, org_id: str) -> str:
+    """
+    Ensure the user belongs to the requested organization.
+    Returns the user's org_id if valid, otherwise raises HTTPException.
+    """
+    profile_org_id = get_user_org_id(user_id)
+    if not profile_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User organization not found"
+        )
+
+    if profile_org_id != org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User does not belong to this organization"
+        )
+
+    return profile_org_id

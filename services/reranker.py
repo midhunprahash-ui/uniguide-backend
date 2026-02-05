@@ -46,7 +46,7 @@ class GeminiReranker:
         """Initialize the Gemini reranker."""
         settings = get_settings()
         genai.configure(api_key=settings.gemini_api_key)
-        self.model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        self.model = genai.GenerativeModel("gemini-2.5-flash")
         self._initialized = True
 
     def _build_rerank_prompt(
