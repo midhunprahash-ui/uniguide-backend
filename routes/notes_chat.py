@@ -30,6 +30,7 @@ class NotesQuery(BaseModel):
     subject_id: Optional[str] = None
     unit_id: Optional[str] = None
     session_id: Optional[str] = None
+    context_key: Optional[str] = None
 
 
 class NotesResponse(BaseModel):
@@ -89,12 +90,16 @@ async def query_notes_stream(
         # Get or create session
         session_id = query.session_id
         if not session_id or not session_manager.get_session(session_id):
+            context_key = query.context_key
+            if not context_key and query.subject_id:
+                context_key = f"note_{query.subject_id}_{query.unit_id or 'subject'}"
             session_id = session_manager.create_session(
                 category="notes",  # Special category for notes
                 year=query.year_id,
                 department=None,
                 org_id=query.org_id,
                 user_id=current_user.get("id"),
+                context_key=context_key,
             )
         
         # Store user question
@@ -163,12 +168,16 @@ async def query_notes(request: Request, query: NotesQuery, current_user: dict = 
         # Get or create session
         session_id = query.session_id
         if not session_id or not session_manager.get_session(session_id):
+            context_key = query.context_key
+            if not context_key and query.subject_id:
+                context_key = f"note_{query.subject_id}_{query.unit_id or 'subject'}"
             session_id = session_manager.create_session(
                 category="notes",
                 year=query.year_id,
                 department=None,
                 org_id=query.org_id,
                 user_id=current_user.get("id"),
+                context_key=context_key,
             )
         
         # Store user question

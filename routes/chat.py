@@ -1,7 +1,7 @@
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse
 
 from models.schemas import ChatQuery, ChatResponse
@@ -36,6 +36,43 @@ async def get_session_history(
     return session_data
 
 
+@router.get("/sessions")
+@limiter.limit(RATE_LIMITS["public"])
+async def list_sessions(
+    request: Request,
+    org_id: str = Query(..., description="Organization ID"),
+    current_user: dict = Depends(require_auth),
+):
+    """
+    List recent chat sessions for the current user within an org.
+    Returns the most recent session per context_key.
+    """
+    require_valid_org_id(org_id)
+    require_org_membership(current_user.get("id"), org_id)
+
+    sessions = session_manager.list_sessions_for_user(current_user.get("id"), org_id, limit=200)
+    seen_keys: set[str] = set()
+    results = []
+
+    for session in sessions:
+        context_key = session.get("context_key")
+        if not context_key:
+            category = session.get("category")
+            if category and category != "notes":
+                context_key = category
+        if not context_key or context_key in seen_keys:
+            continue
+        seen_keys.add(context_key)
+        results.append({
+            "context_key": context_key,
+            "session_id": session.get("id"),
+            "category": session.get("category"),
+            "updated_at": session.get("updated_at"),
+        })
+
+    return {"sessions": results}
+
+
 @router.post("/query-stream")
 @limiter.limit(RATE_LIMITS["chat"], key_func=get_org_key)
 async def query_chat_stream(request: Request, query: ChatQuery, current_user: dict = Depends(require_auth)):
@@ -58,6 +95,7 @@ async def query_chat_stream(request: Request, query: ChatQuery, current_user: di
                 department=query.department,
                 org_id=query.org_id,
                 user_id=current_user.get("id"),
+                context_key=query.context_key or query.category,
             )
 
         # Store user question in session
@@ -148,6 +186,7 @@ async def query_chat(request: Request, query: ChatQuery, current_user: dict = De
                 department=query.department,
                 org_id=query.org_id,
                 user_id=current_user.get("id"),
+                context_key=query.context_key or query.category,
             )
 
         # Store user question in session
