@@ -204,6 +204,7 @@ def process_upload_payload(payload: dict[str, Any]) -> dict[str, Any]:
             })
 
             # Circular summary + register
+            circular_id = None
             if payload.get("category") == "circulars":
                 from services.rag_engine import rag_engine
                 extracted_text = result.get("extracted_text", "")
@@ -214,7 +215,7 @@ def process_upload_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 }).eq("id", document_id).execute()
 
                 from routes.circular import register_circular
-                register_circular(
+                circular_id = register_circular(
                     doc_id=document_id,
                     filename=filename,
                     year=payload.get("year", "all"),
@@ -235,7 +236,7 @@ def process_upload_payload(payload: dict[str, Any]) -> dict[str, Any]:
                         document_id=document_id,
                         document_text=result["extracted_text"],
                         org_id=org_id,
-                        circular_id=None,
+                        circular_id=circular_id,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to extract deadlines from document: {e}")
