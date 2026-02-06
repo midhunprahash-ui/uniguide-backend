@@ -7,6 +7,7 @@ import os
 from typing import Optional
 
 from services.supabase_client import get_supabase_admin_client
+from services.storage_paths import build_object_key, build_storage_path, split_storage_path
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,11 @@ def upload_file(
     file_path: str,
     category: str,
     filename: str,
-    content_type: Optional[str] = None
+    content_type: Optional[str] = None,
+    org_id: Optional[str] = None,
+    uploaded_by: Optional[str] = None,
+    object_key: Optional[str] = None,
+    namespace: str = "documents",
 ) -> str:
     """
     Upload a file to Supabase Storage.
@@ -45,6 +50,10 @@ def upload_file(
         category: Document category (determines bucket)
         filename: Name to store the file as
         content_type: Optional MIME type
+        org_id: Optional organization ID for tenant-scoped key generation
+        uploaded_by: Optional uploader user ID for user-scoped key generation
+        object_key: Optional pre-built object key (takes precedence)
+        namespace: Namespace segment when generating object keys
     
     Returns:
         Storage path (bucket/filename format)
@@ -52,6 +61,19 @@ def upload_file(
     client = get_supabase_admin_client()
     bucket = get_bucket_for_category(category)
     
+    if object_key:
+        key = object_key.lstrip("/")
+    elif org_id:
+        key = build_object_key(
+            org_id=org_id,
+            filename=filename,
+            namespace=namespace,
+            user_id=uploaded_by,
+        )
+    else:
+        # Backwards-compatible fallback for legacy callsites.
+        key = filename
+
     # Read file content
     with open(file_path, "rb") as f:
         file_data = f.read()
@@ -70,13 +92,13 @@ def upload_file(
     
     try:
         # Upload to Supabase Storage
-        result = client.storage.from_(bucket).upload(
-            path=filename,
+        client.storage.from_(bucket).upload(
+            path=key,
             file=file_data,
             file_options={"content-type": content_type, "upsert": "true"}
         )
-        
-        storage_path = f"{bucket}/{filename}"
+
+        storage_path = build_storage_path(bucket, key)
         logger.info(f"✅ Uploaded file to Supabase Storage: {storage_path}")
         return storage_path
         
@@ -97,12 +119,11 @@ def download_file(storage_path: str) -> bytes:
     """
     client = get_supabase_admin_client()
     
-    parts = storage_path.split("/", 1)
-    if len(parts) != 2:
+    try:
+        bucket, filename = split_storage_path(storage_path)
+    except ValueError:
         raise ValueError(f"Invalid storage path: {storage_path}")
-    
-    bucket, filename = parts
-    
+
     try:
         result = client.storage.from_(bucket).download(filename)
         logger.info(f"✅ Downloaded file from Supabase Storage: {storage_path}")
@@ -125,13 +146,12 @@ def delete_file(storage_path: str) -> bool:
     """
     client = get_supabase_admin_client()
     
-    parts = storage_path.split("/", 1)
-    if len(parts) != 2:
+    try:
+        bucket, filename = split_storage_path(storage_path)
+    except ValueError:
         logger.warning(f"Invalid storage path for deletion: {storage_path}")
         return False
-    
-    bucket, filename = parts
-    
+
     try:
         client.storage.from_(bucket).remove([filename])
         logger.info(f"✅ Deleted file from Supabase Storage: {storage_path}")
@@ -155,12 +175,11 @@ def get_public_url(storage_path: str, expires_in: int = 3600) -> str:
     """
     client = get_supabase_admin_client()
     
-    parts = storage_path.split("/", 1)
-    if len(parts) != 2:
+    try:
+        bucket, filename = split_storage_path(storage_path)
+    except ValueError:
         raise ValueError(f"Invalid storage path: {storage_path}")
-    
-    bucket, filename = parts
-    
+
     try:
         result = client.storage.from_(bucket).create_signed_url(
             path=filename,
@@ -185,12 +204,11 @@ def file_exists(storage_path: str) -> bool:
     """
     client = get_supabase_admin_client()
     
-    parts = storage_path.split("/", 1)
-    if len(parts) != 2:
+    try:
+        bucket, filename = split_storage_path(storage_path)
+    except ValueError:
         return False
-    
-    bucket, filename = parts
-    
+
     try:
         # List files to check existence
         result = client.storage.from_(bucket).list(path="", options={"search": filename})
@@ -245,21 +263,23 @@ def rename_file(old_storage_path: str, new_filename: str) -> str:
     """
     client = get_supabase_admin_client()
     
-    parts = old_storage_path.split("/", 1)
-    if len(parts) != 2:
+    try:
+        bucket, old_filename = split_storage_path(old_storage_path)
+    except ValueError:
         raise ValueError(f"Invalid storage path: {old_storage_path}")
-    
-    bucket, old_filename = parts
-    
-    if old_filename == new_filename:
+
+    old_dir = old_filename.rsplit("/", 1)[0] if "/" in old_filename else ""
+    target_filename = f"{old_dir}/{new_filename}" if old_dir else new_filename
+
+    if old_filename == target_filename:
         return old_storage_path  # No change needed
-    
+
     try:
         # Download file content
         file_data = client.storage.from_(bucket).download(old_filename)
         
         # Determine content type
-        ext = new_filename.split(".")[-1].lower()
+        ext = target_filename.split(".")[-1].lower()
         content_type_map = {
             "pdf": "application/pdf",
             "png": "image/png",
@@ -271,7 +291,7 @@ def rename_file(old_storage_path: str, new_filename: str) -> str:
         
         # Upload with new name
         client.storage.from_(bucket).upload(
-            path=new_filename,
+            path=target_filename,
             file=file_data,
             file_options={"content-type": content_type, "upsert": "true"}
         )
@@ -279,7 +299,7 @@ def rename_file(old_storage_path: str, new_filename: str) -> str:
         # Delete old file
         client.storage.from_(bucket).remove([old_filename])
         
-        new_storage_path = f"{bucket}/{new_filename}"
+        new_storage_path = build_storage_path(bucket, target_filename)
         logger.info(f"✅ Renamed file in Storage: {old_storage_path} -> {new_storage_path}")
         return new_storage_path
         

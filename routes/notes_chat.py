@@ -62,6 +62,11 @@ async def get_notes_session_history(
 
     if session_data.get("user_id") != current_user.get("id"):
         raise HTTPException(status_code=403, detail="Access denied")
+
+    session_org_id = session_data.get("org_id")
+    if not session_org_id:
+        raise HTTPException(status_code=403, detail="Session organization is missing")
+    require_org_membership(current_user.get("id"), session_org_id)
     
     return session_data
 
@@ -89,7 +94,27 @@ async def query_notes_stream(
         
         # Get or create session
         session_id = query.session_id
-        if not session_id or not session_manager.get_session(session_id):
+        if session_id:
+            existing_session = session_manager.get_session(session_id)
+            if not existing_session:
+                context_key = query.context_key
+                if not context_key and query.subject_id:
+                    context_key = f"note_{query.subject_id}_{query.unit_id or 'subject'}"
+                session_id = session_manager.create_session(
+                    category="notes",  # Special category for notes
+                    year=query.year_id,
+                    department=None,
+                    org_id=query.org_id,
+                    user_id=current_user.get("id"),
+                    context_key=context_key,
+                )
+            elif not session_manager.get_session_for_user(
+                session_id,
+                org_id=query.org_id,
+                user_id=current_user.get("id"),
+            ):
+                raise HTTPException(status_code=403, detail="Access denied for session")
+        else:
             context_key = query.context_key
             if not context_key and query.subject_id:
                 context_key = f"note_{query.subject_id}_{query.unit_id or 'subject'}"
@@ -147,7 +172,9 @@ async def query_notes_stream(
                 yield f"data: {error_json}\n\n"
         
         return StreamingResponse(event_generator(), media_type="text/event-stream")
-    
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error starting stream: {str(e)}")
 
@@ -167,7 +194,27 @@ async def query_notes(request: Request, query: NotesQuery, current_user: dict = 
         
         # Get or create session
         session_id = query.session_id
-        if not session_id or not session_manager.get_session(session_id):
+        if session_id:
+            existing_session = session_manager.get_session(session_id)
+            if not existing_session:
+                context_key = query.context_key
+                if not context_key and query.subject_id:
+                    context_key = f"note_{query.subject_id}_{query.unit_id or 'subject'}"
+                session_id = session_manager.create_session(
+                    category="notes",
+                    year=query.year_id,
+                    department=None,
+                    org_id=query.org_id,
+                    user_id=current_user.get("id"),
+                    context_key=context_key,
+                )
+            elif not session_manager.get_session_for_user(
+                session_id,
+                org_id=query.org_id,
+                user_id=current_user.get("id"),
+            ):
+                raise HTTPException(status_code=403, detail="Access denied for session")
+        else:
             context_key = query.context_key
             if not context_key and query.subject_id:
                 context_key = f"note_{query.subject_id}_{query.unit_id or 'subject'}"
@@ -211,7 +258,9 @@ async def query_notes(request: Request, query: NotesQuery, current_user: dict = 
             session_id=session_id,
             subject=result.get("subject")
         )
-    
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
 
@@ -224,7 +273,8 @@ async def query_notes(request: Request, query: NotesQuery, current_user: dict = 
 async def browse_subjects(
     request: Request,
     org_id: str,
-    year_id: Optional[str] = None
+    year_id: Optional[str] = None,
+    current_user: dict = Depends(require_auth),
 ):
     """
     Get subjects for browsing in the notes sidebar.
@@ -233,6 +283,7 @@ async def browse_subjects(
     from services.supabase_client import get_supabase_admin_client
     
     require_valid_org_id(org_id)
+    require_org_membership(current_user.get("id"), org_id)
     
     client = get_supabase_admin_client()
     
@@ -250,7 +301,7 @@ async def browse_subjects(
         # Get note count for this subject
         notes_count = client.table("notes").select(
             "id", count="exact"
-        ).eq("subject_id", subject["id"]).is_("deleted_at", "null").execute()
+        ).eq("subject_id", subject["id"]).eq("org_id", org_id).is_("deleted_at", "null").execute()
         
         subjects.append({
             **subject,
@@ -264,7 +315,8 @@ async def browse_subjects(
 async def browse_subject_units(
     request: Request,
     subject_id: str,
-    org_id: str
+    org_id: str,
+    current_user: dict = Depends(require_auth),
 ):
     """
     Get units for a subject with their notes.
@@ -272,6 +324,7 @@ async def browse_subject_units(
     from services.supabase_client import get_supabase_admin_client
     
     require_valid_org_id(org_id)
+    require_org_membership(current_user.get("id"), org_id)
     
     client = get_supabase_admin_client()
     
@@ -285,7 +338,7 @@ async def browse_subject_units(
         # Get notes for this unit
         notes = client.table("notes").select(
             "id, title, original_filename, one_line_summary"
-        ).eq("unit_id", unit["id"]).is_("deleted_at", "null").order("created_at").execute()
+        ).eq("unit_id", unit["id"]).eq("org_id", org_id).is_("deleted_at", "null").order("created_at").execute()
         
         result.append({
             **unit,

@@ -32,6 +32,11 @@ async def get_session_history(
 
     if session_data.get("user_id") != current_user.get("id"):
         raise HTTPException(status_code=403, detail="Access denied")
+
+    session_org_id = session_data.get("org_id")
+    if not session_org_id:
+        raise HTTPException(status_code=403, detail="Session organization is missing")
+    require_org_membership(current_user.get("id"), session_org_id)
     
     return session_data
 
@@ -88,7 +93,24 @@ async def query_chat_stream(request: Request, query: ChatQuery, current_user: di
 
         # Get or create session
         session_id = query.session_id
-        if not session_id or not session_manager.get_session(session_id):
+        if session_id:
+            existing_session = session_manager.get_session(session_id)
+            if not existing_session:
+                session_id = session_manager.create_session(
+                    category=query.category,
+                    year=query.year,
+                    department=query.department,
+                    org_id=query.org_id,
+                    user_id=current_user.get("id"),
+                    context_key=query.context_key or query.category,
+                )
+            elif not session_manager.get_session_for_user(
+                session_id,
+                org_id=query.org_id,
+                user_id=current_user.get("id"),
+            ):
+                raise HTTPException(status_code=403, detail="Access denied for session")
+        else:
             session_id = session_manager.create_session(
                 category=query.category,
                 year=query.year,
@@ -154,6 +176,8 @@ async def query_chat_stream(request: Request, query: ChatQuery, current_user: di
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error starting stream: {str(e)}")
 
@@ -179,7 +203,24 @@ async def query_chat(request: Request, query: ChatQuery, current_user: dict = De
 
         # Get or create session
         session_id = query.session_id
-        if not session_id or not session_manager.get_session(session_id):
+        if session_id:
+            existing_session = session_manager.get_session(session_id)
+            if not existing_session:
+                session_id = session_manager.create_session(
+                    category=query.category,
+                    year=query.year,
+                    department=query.department,
+                    org_id=query.org_id,
+                    user_id=current_user.get("id"),
+                    context_key=query.context_key or query.category,
+                )
+            elif not session_manager.get_session_for_user(
+                session_id,
+                org_id=query.org_id,
+                user_id=current_user.get("id"),
+            ):
+                raise HTTPException(status_code=403, detail="Access denied for session")
+        else:
             session_id = session_manager.create_session(
                 category=query.category,
                 year=query.year,
@@ -219,5 +260,7 @@ async def query_chat(request: Request, query: ChatQuery, current_user: dict = De
             sources=result["sources"],
             session_id=session_id
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")

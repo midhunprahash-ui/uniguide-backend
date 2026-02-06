@@ -13,6 +13,7 @@ from services import supabase_storage
 from services.document_processor import document_processor
 from services.supabase_client import get_supabase_admin_client
 from services.admin_stats import refresh_document_stats
+from services.storage_paths import validate_storage_path
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -89,6 +90,35 @@ def process_upload_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not org_id:
         raise ValueError("org_id is required")
 
+    storage_path = payload.get("storage_path")
+    if storage_path:
+        category = payload.get("category", "rules")
+        expected_bucket = supabase_storage.get_bucket_for_category(category)
+        uploaded_by = payload.get("uploaded_by")
+        is_user_scoped_path = validate_storage_path(
+            storage_path=storage_path,
+            org_id=org_id,
+            expected_bucket=expected_bucket,
+            expected_user_id=uploaded_by,
+            allow_legacy_org_prefix=False,
+        )
+        is_org_scoped_path = validate_storage_path(
+            storage_path=storage_path,
+            org_id=org_id,
+            expected_bucket=expected_bucket,
+            allow_legacy_org_prefix=False,
+        )
+        is_legacy_path = validate_storage_path(
+            storage_path=storage_path,
+            org_id=org_id,
+            expected_bucket=expected_bucket,
+            allow_legacy_org_prefix=True,
+        )
+        if not is_user_scoped_path and not is_org_scoped_path and not is_legacy_path:
+            raise ValueError("Invalid storage_path scope for upload payload")
+        if is_legacy_path and not is_org_scoped_path:
+            logger.warning("Processing upload payload with legacy storage path: %s", storage_path)
+
     file_path = None
     try:
         file_path = _ensure_local_file(payload)
@@ -119,6 +149,9 @@ def process_upload_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 file_path=file_path,
                 category=payload.get("category", "rules"),
                 filename=filename,
+                org_id=org_id,
+                uploaded_by=payload.get("uploaded_by"),
+                namespace=f"documents/{payload.get('category', 'rules')}",
             )
 
         # Update document record with storage path and FK IDs
@@ -171,6 +204,7 @@ def process_upload_payload(payload: dict[str, Any]) -> dict[str, Any]:
             })
 
             # Circular summary + register
+            circular_id = None
             if payload.get("category") == "circulars":
                 from services.rag_engine import rag_engine
                 extracted_text = result.get("extracted_text", "")
@@ -181,7 +215,7 @@ def process_upload_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 }).eq("id", document_id).execute()
 
                 from routes.circular import register_circular
-                register_circular(
+                circular_id = register_circular(
                     doc_id=document_id,
                     filename=filename,
                     year=payload.get("year", "all"),
@@ -202,7 +236,7 @@ def process_upload_payload(payload: dict[str, Any]) -> dict[str, Any]:
                         document_id=document_id,
                         document_text=result["extracted_text"],
                         org_id=org_id,
-                        circular_id=None,
+                        circular_id=circular_id,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to extract deadlines from document: {e}")
