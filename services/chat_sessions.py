@@ -30,9 +30,9 @@ class SupabaseChatSessionManager:
         category: str = "rules",
         year: str = "all",
         department: str = "all",
-        org_id: str = None,
-        user_id: str = None,
-        context_key: str | None = None
+        org_id: str | None = None,
+        user_id: str | None = None,
+        context_key: str | None = None,
     ) -> str:
         """Create a new chat session and return its ID.
 
@@ -43,11 +43,10 @@ class SupabaseChatSessionManager:
             org_id: Organization ID for multi-tenant isolation (REQUIRED for proper isolation)
             user_id: User ID (None for anonymous sessions)
         """
-        session_id = str(uuid.uuid4())
-
-        # CRITICAL: org_id is REQUIRED for tenant isolation - NO FALLBACKS!
         if not org_id:
-            logger.warning("No org_id provided for chat session - session will not be org-scoped")
+            raise ValueError("org_id is required to create a chat session")
+
+        session_id = str(uuid.uuid4())
 
         try:
             payload = {
@@ -89,17 +88,45 @@ class SupabaseChatSessionManager:
                     logger.error(f"Error creating session fallback: {fallback_error}")
 
             logger.error(f"Error creating session: {e}")
-            # Fallback to UUID for now
-            return session_id
+            raise
 
     def get_session(self, session_id: str) -> Optional[dict]:
         """Get a session by ID, return None if not found."""
         try:
             result = self.client.table("chat_sessions").select("*").eq("id", session_id).single().execute()
             return result.data
-        except Exception as e:
+        except Exception:
             logger.debug(f"Session not found: {session_id}")
             return None
+
+    def get_session_for_user(
+        self,
+        session_id: str,
+        *,
+        org_id: str,
+        user_id: str | None,
+        allow_anonymous: bool = False,
+    ) -> Optional[dict]:
+        """
+        Return session only if org/user ownership checks pass.
+
+        Args:
+            session_id: Session UUID.
+            org_id: Expected tenant org_id.
+            user_id: Expected user id.
+            allow_anonymous: Allow user_id NULL sessions when True.
+        """
+        session = self.get_session(session_id)
+        if not session:
+            return None
+        if session.get("org_id") != org_id:
+            return None
+        session_user_id = session.get("user_id")
+        if user_id and session_user_id == user_id:
+            return session
+        if allow_anonymous and session_user_id is None:
+            return session
+        return None
 
     def add_message(
         self,
@@ -110,12 +137,18 @@ class SupabaseChatSessionManager:
     ) -> bool:
         """Add a message to a session. Returns False if failed."""
         try:
+            session = self.get_session(session_id)
+            if not session:
+                logger.warning("Cannot add message: unknown session %s", session_id)
+                return False
+
             # Insert message
             self.client.table("chat_messages").insert({
                 "session_id": session_id,
                 "role": role,
                 "content": content,
-                "sources": sources or []
+                "sources": sources or [],
+                "org_id": session.get("org_id"),
             }).execute()
             
             # Update session's last activity
