@@ -16,6 +16,7 @@ from services.supabase_client import get_supabase_admin_client
 from services.document_processor import document_processor
 from services.rag_engine import rag_engine
 from services.notes_vector_store import notes_vector_store
+from services.storage_paths import build_object_key, sanitize_filename
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -44,8 +45,7 @@ def download_note_from_storage(file_path: str) -> bytes | None:
     """Download a note file from Supabase Storage."""
     client = get_supabase_admin_client()
     try:
-        # file_path format: "notes/org_id/filename.pdf"
-        # Extract the path after bucket name if it starts with bucket/
+        # Backward-compat: old records might include "notes/" prefix in object key.
         if file_path.startswith(f"{NOTES_BUCKET}/"):
             path = file_path[len(f"{NOTES_BUCKET}/"):]
         else:
@@ -177,7 +177,12 @@ async def upload_note(
     # Generate unique filename
     file_ext = os.path.splitext(file.filename)[1].lower()
     unique_filename = f"{uuid_module.uuid4().hex}{file_ext}"
-    file_path = f"notes/{org_id}/{unique_filename}"
+    object_key = build_object_key(
+        org_id=org_id,
+        filename=sanitize_filename(unique_filename),
+        namespace="notes",
+        user_id=admin.get("id"),
+    )
     
     # Read file content
     file_content = await file.read()
@@ -194,7 +199,7 @@ async def upload_note(
         
         # Upload to Supabase Storage
         storage_result = upload_note_to_storage(
-            file_path=file_path,
+            file_path=object_key,
             file_content=file_content,
             content_type=file.content_type
         )
@@ -289,7 +294,7 @@ async def upload_note(
             "stream_id": department.data["stream_id"],
             "filename": unique_filename,
             "original_filename": file.filename,
-            "file_path": file_path,
+            "file_path": object_key,
             "file_size_bytes": file_size,
             "mime_type": file.content_type,
             "title": title,

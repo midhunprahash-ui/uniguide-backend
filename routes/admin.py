@@ -32,6 +32,13 @@ from services.supabase_auth import require_admin
 from services.supabase_client import get_supabase_admin_client
 from services.vector_store import vector_store
 from services.rate_limiter import limiter, RATE_LIMITS, get_org_key, get_ip_key
+from services.storage_paths import (
+    build_object_key,
+    build_storage_path,
+    sanitize_filename,
+    split_storage_path,
+    validate_storage_path,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -54,11 +61,6 @@ class UploadUrlRequest(BaseModel):
     category: str
     content_type: str | None = None
     file_size_bytes: int | None = None
-
-
-def _sanitize_filename(filename: str) -> str:
-    safe = "".join(c for c in filename if c.isalnum() or c in {".", "-", "_"})
-    return safe or "document"
 
 
 def _extract_file_ext(filename: str) -> str:
@@ -180,10 +182,16 @@ async def create_upload_url(
     org_id = admin.get("org_id")
     if not org_id:
         raise HTTPException(status_code=400, detail="User has no organization")
+    if payload.category not in VALID_CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"Invalid category: {payload.category}")
 
     bucket = supabase_storage.get_bucket_for_category(payload.category)
-    safe_name = _sanitize_filename(payload.filename)
-    path = f"{org_id}/{uuid_module.uuid4()}-{safe_name}"
+    path = build_object_key(
+        org_id=org_id,
+        filename=sanitize_filename(payload.filename),
+        namespace=f"documents/{payload.category}",
+        user_id=admin.get("id"),
+    )
 
     client = get_supabase_admin_client()
     try:
@@ -207,7 +215,7 @@ async def create_upload_url(
     return {
         "bucket": bucket,
         "path": path,
-        "storage_path": f"{bucket}/{path}",
+        "storage_path": build_storage_path(bucket, path),
         "signed_url": signed_url,
         "token": token,
     }
@@ -291,6 +299,31 @@ async def upload_document(
 
     # Check for duplicate filename in active documents for this org
     org_id = admin.get("org_id")
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User has no organization")
+    expected_bucket = supabase_storage.get_bucket_for_category(category)
+
+    # For direct uploads, accept only storage paths in the caller's scoped namespace.
+    if storage_path:
+        in_user_scope = validate_storage_path(
+            storage_path=storage_path,
+            org_id=org_id,
+            expected_bucket=expected_bucket,
+            expected_user_id=admin.get("id"),
+        )
+        in_org_scope = validate_storage_path(
+            storage_path=storage_path,
+            org_id=org_id,
+            expected_bucket=expected_bucket,
+        )
+        if not in_user_scope and not in_org_scope:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid storage_path. Upload path does not match your organization scope.",
+            )
+        if in_org_scope and not in_user_scope:
+            logger.warning("Accepting legacy org-scoped storage path for upload: %s", storage_path)
+
     try:
         existing_doc = db_client.table("documents").select("id, filename").eq("filename", filename).eq("org_id", org_id).execute()
         if existing_doc.data and len(existing_doc.data) > 0:
@@ -352,7 +385,10 @@ async def upload_document(
                 storage_path = supabase_storage.upload_file(
                     file_path=file_path,
                     category=category,
-                    filename=filename
+                    filename=filename,
+                    org_id=org_id,
+                    uploaded_by=admin.get("id"),
+                    namespace=f"documents/{category}",
                 )
                 payload["storage_path"] = storage_path
 
@@ -871,12 +907,14 @@ async def rename_document(
             except Exception as storage_err:
                 # Storage rename failed (file might not exist) - continue with DB update only
                 logger.warning(f"Storage rename failed (continuing with DB update): {storage_err}")
-                # Update storage_path to new filename anyway (keep bucket, change filename)
-                if "/" in storage_path:
-                    bucket = storage_path.split("/")[0]
-                    new_storage_path = f"{bucket}/{new_filename}"
-                else:
-                    new_storage_path = new_filename
+                # Update storage_path to new filename anyway (keep existing prefix when possible)
+                try:
+                    bucket, object_key = split_storage_path(storage_path)
+                    object_dir = object_key.rsplit("/", 1)[0] if "/" in object_key else ""
+                    target_key = f"{object_dir}/{new_filename}" if object_dir else new_filename
+                    new_storage_path = build_storage_path(bucket, target_key)
+                except ValueError:
+                    new_storage_path = storage_path
 
         # Update in Supabase DB
         client.table("documents").update({

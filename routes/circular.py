@@ -64,9 +64,6 @@ def register_circular(
     except Exception as e:
         logger.error(f"Error registering circular: {e}")
         return None
-                
-    except Exception as e:
-        logger.error(f"Error registering circular: {e}")
 
 
 def get_latest_circular(org_id: str = None):
@@ -192,17 +189,6 @@ async def chat_about_circular(query: CircularChatQuery):
         ChatResponse with answer, sources, and session_id
     """
     try:
-        # Get or create session
-        session_id = query.session_id
-        if not session_id or not session_manager.get_session(session_id):
-            session_id = session_manager.create_session()
-
-        # Store user question in session
-        session_manager.add_message(session_id, "user", query.question)
-
-        # Get conversation history (limit to last 5 exchanges = 10 messages)
-        history = session_manager.get_history(session_id, limit=10)
-
         # Get default org_id for circular chat (uses sjit as default)
         client = get_supabase_admin_client()
         org = client.table("organizations").select("id").eq("slug", "sjit").single().execute()
@@ -210,6 +196,40 @@ async def chat_about_circular(query: CircularChatQuery):
 
         if not org_id:
             raise HTTPException(status_code=500, detail="Could not determine organization")
+
+        # Get or create session
+        session_id = query.session_id
+        if session_id:
+            existing_session = session_manager.get_session(session_id)
+            if not existing_session:
+                session_id = session_manager.create_session(
+                    category="circulars",
+                    year="all",
+                    department="all",
+                    org_id=org_id,
+                    user_id=None,
+                )
+            elif not session_manager.get_session_for_user(
+                session_id,
+                org_id=org_id,
+                user_id=None,
+                allow_anonymous=True,
+            ):
+                raise HTTPException(status_code=403, detail="Access denied for session")
+        else:
+            session_id = session_manager.create_session(
+                category="circulars",
+                year="all",
+                department="all",
+                org_id=org_id,
+                user_id=None,
+            )
+
+        # Store user question in session
+        session_manager.add_message(session_id, "user", query.question)
+
+        # Get conversation history (limit to last 5 exchanges = 10 messages)
+        history = session_manager.get_history(session_id, limit=10)
 
         # Query RAG with circulars category filter
         result = rag_engine.query(
@@ -230,6 +250,8 @@ async def chat_about_circular(query: CircularChatQuery):
             sources=result["sources"],
             session_id=session_id
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error processing circular query: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing circular query: {str(e)}")
