@@ -9,13 +9,16 @@ Design Principles:
 """
 import logging
 import asyncio
+import hashlib
+import re
 from datetime import date, datetime, timedelta
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Depends
 from pydantic import BaseModel, Field
 
+from services.auth import require_auth
 from services.supabase_client import get_supabase_admin_client
 from services.deadline_extractor import (
     extract_deadlines_from_text,
@@ -52,6 +55,11 @@ class DeadlineResponse(BaseModel):
     target_years: list[int] = []
     document_id: Optional[str] = None
     circular_id: Optional[str] = None
+    series_key: Optional[str] = None
+    series_occurrence: Optional[int] = None
+    series_total: Optional[int] = None
+    is_series_start: Optional[bool] = None
+    is_series_end: Optional[bool] = None
 
 
 class DeadlineInteraction(BaseModel):
@@ -103,6 +111,215 @@ def get_existing_deadline_document_ids(org_id: str) -> set[str]:
         return set()
 
 
+DATE_HINT_PATTERN = re.compile(
+    r"\b("
+    r"\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?"
+    r"|\d{4}-\d{2}-\d{2}"
+    r"|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?"
+    r"|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+    r"|today|tomorrow"
+    r")\b",
+    re.IGNORECASE,
+)
+MAX_EXTRACTION_SEGMENTS = 24
+SEGMENT_SIZE_CHARS = 11_000
+SEGMENT_OVERLAP_CHARS = 1_200
+
+
+def _normalize_text(value: str) -> str:
+    return " ".join((value or "").strip().lower().split())
+
+
+def _parse_csv_tokens(raw: Optional[str]) -> list[str]:
+    if not raw:
+        return []
+    tokens = [token.strip() for token in str(raw).split(",")]
+    return sorted({token for token in tokens if token and token.lower() != "all"})
+
+
+def _parse_year_tokens(raw: Optional[str]) -> list[int]:
+    if not raw:
+        return []
+    values: set[int] = set()
+    for token in str(raw).split(","):
+        digits = "".join(ch for ch in token if ch.isdigit())
+        if digits:
+            values.add(int(digits))
+    return sorted(values)
+
+
+def _normalize_string_list(values: Optional[list]) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    cleaned = {_normalize_text(str(v)) for v in values if str(v).strip()}
+    return sorted(v for v in cleaned if v and v != "all")
+
+
+def _normalize_int_list(values: Optional[list]) -> list[int]:
+    if not isinstance(values, list):
+        return []
+    cleaned: set[int] = set()
+    for value in values:
+        if isinstance(value, int):
+            cleaned.add(value)
+            continue
+        digits = "".join(ch for ch in str(value) if ch.isdigit())
+        if digits:
+            cleaned.add(int(digits))
+    return sorted(cleaned)
+
+
+def _build_deadline_signature(deadline_data: dict) -> str:
+    signature_source = "|".join(
+        [
+            _normalize_text(deadline_data.get("title", "")),
+            _normalize_text(deadline_data.get("event_type", "other")),
+            str(deadline_data.get("deadline_date") or ""),
+            str(deadline_data.get("end_date") or ""),
+            str(deadline_data.get("deadline_time") or ""),
+            ",".join(_normalize_string_list(deadline_data.get("target_streams"))),
+            ",".join(_normalize_string_list(deadline_data.get("target_departments"))),
+            ",".join(str(v) for v in _normalize_int_list(deadline_data.get("target_years"))),
+        ]
+    )
+    return hashlib.sha256(signature_source.encode("utf-8")).hexdigest()
+
+
+def _event_signature(event: dict) -> str:
+    return _build_deadline_signature(
+        {
+            "title": event.get("title"),
+            "event_type": event.get("event_type"),
+            "deadline_date": event.get("deadline_date"),
+            "end_date": event.get("end_date"),
+            "deadline_time": event.get("deadline_time"),
+            "target_streams": event.get("target_streams"),
+            "target_departments": event.get("target_departments"),
+            "target_years": event.get("target_years"),
+        }
+    )
+
+
+def _build_extraction_segments(document_text: str) -> list[str]:
+    text = (document_text or "").strip()
+    if not text:
+        return []
+
+    segments: list[tuple[int, str, int]] = []
+    step = max(SEGMENT_SIZE_CHARS - SEGMENT_OVERLAP_CHARS, 1_000)
+    start = 0
+    index = 0
+    text_len = len(text)
+
+    while start < text_len:
+        end = min(start + SEGMENT_SIZE_CHARS, text_len)
+        segment = text[start:end]
+        score = len(DATE_HINT_PATTERN.findall(segment))
+        segments.append((index, segment, score))
+        if end >= text_len:
+            break
+        start += step
+        index += 1
+
+    if len(segments) <= MAX_EXTRACTION_SEGMENTS:
+        return [segment for _, segment, _ in segments]
+
+    selected: set[int] = {0, len(segments) - 1}
+    ranked = sorted(
+        segments[1:-1],
+        key=lambda entry: (entry[2], -entry[0]),
+        reverse=True,
+    )
+
+    for idx, _, _ in ranked:
+        if len(selected) >= MAX_EXTRACTION_SEGMENTS:
+            break
+        selected.add(idx)
+
+    return [segments[idx][1] for idx in sorted(selected)]
+
+
+def _get_document_semester(value: object) -> str:
+    if value is None:
+        return "all"
+    return str(value).strip().lower() or "all"
+
+
+def _matches_semester_filter(document_semester: str, semester: Optional[int]) -> bool:
+    if semester is None:
+        return True
+    if not document_semester or document_semester == "all":
+        return True
+    tokens = [token.strip().lower() for token in document_semester.split(",") if token.strip()]
+    if not tokens:
+        return True
+    return str(semester) in tokens
+
+
+def _matches_stream_filter(target_streams: list[str], stream: Optional[str], fallback_stream: Optional[str]) -> bool:
+    if not stream:
+        return True
+    selected = stream.strip().lower()
+    if selected == "all":
+        return True
+
+    normalized_targets = [value.lower() for value in target_streams if value]
+    if normalized_targets:
+        return selected in normalized_targets
+
+    fallback_values = [value.lower() for value in _parse_csv_tokens(fallback_stream)]
+    if not fallback_values:
+        return True
+    return selected in fallback_values
+
+
+def _matches_department_filter(
+    target_departments: list[str],
+    department: Optional[str],
+    fallback_department: Optional[str],
+) -> bool:
+    if not department:
+        return True
+    selected = department.strip().lower()
+    if selected == "all":
+        return True
+
+    normalized_targets = [value.lower() for value in target_departments if value]
+    if normalized_targets:
+        return selected in normalized_targets
+
+    fallback_values = [value.lower() for value in _parse_csv_tokens(fallback_department)]
+    if not fallback_values:
+        return True
+    return selected in fallback_values
+
+
+def _matches_year_filter(target_years: list[int], year: Optional[int], fallback_year: Optional[str]) -> bool:
+    if year is None:
+        return True
+    if target_years:
+        return year in target_years
+    fallback_values = _parse_year_tokens(fallback_year)
+    if not fallback_values:
+        return True
+    return year in fallback_values
+
+
+def _build_series_key(deadline_data: dict) -> str:
+    source = "|".join(
+        [
+            _normalize_text(deadline_data.get("title", "")),
+            _normalize_text(deadline_data.get("event_type", "other")),
+            ",".join(_normalize_string_list(deadline_data.get("target_streams"))),
+            ",".join(_normalize_string_list(deadline_data.get("target_departments"))),
+            ",".join(str(v) for v in _normalize_int_list(deadline_data.get("target_years"))),
+            str(deadline_data.get("document_id") or ""),
+            str(deadline_data.get("circular_id") or ""),
+        ]
+    )
+    return hashlib.sha1(source.encode("utf-8")).hexdigest()[:16]
+
+
 # ============================================================================
 # API ENDPOINTS
 # ============================================================================
@@ -113,6 +330,7 @@ async def get_upcoming_deadlines(
     stream: Optional[str] = Query(None, description="Stream code filter"),
     department: Optional[str] = Query(None, description="Department code filter"),
     year: Optional[int] = Query(None, description="Year number filter"),
+    semester: Optional[int] = Query(None, ge=1, le=8, description="Semester number filter"),
     event_type: Optional[str] = Query(None, description="Filter by event type"),
     limit: int = Query(20, ge=1, le=100, description="Max number of events to return")
 ):
@@ -121,38 +339,50 @@ async def get_upcoming_deadlines(
     
     Features:
     - Excludes dismissed deadlines for this user
-    - Filters by stream/department/year if specified
+    - Filters by stream/department/year/semester if specified
     - Orders by smart_score (urgency × importance)
+    - Includes ongoing multi-day events
     """
     client = get_supabase_admin_client()
-    
+
     try:
         org_id = get_org_id_from_slug()
         if not org_id:
             return []
-        
+
         today = date.today()
-        
-        # Build query for active, future deadlines
-        query = client.table("deadlines").select("*").eq(
-            "org_id", org_id
-        ).eq(
-            "status", "active"
-        ).gte(
-            "deadline_date", today.isoformat()
+
+        columns = (
+            "id,title,description,event_type,deadline_date,end_date,deadline_time,"
+            "priority,target_streams,target_departments,target_years,document_id,circular_id"
         )
-        
-        # Add event type filter if specified
+
+        # Build query for active, relevant deadlines.
+        # Include:
+        # - future single-day events (deadline_date >= today)
+        # - ongoing multi-day events (end_date >= today)
+        query = (
+            client.table("deadlines")
+            .select(columns)
+            .eq("org_id", org_id)
+            .eq("status", "active")
+            .or_(
+                f"deadline_date.gte.{today.isoformat()},"
+                f"and(end_date.not.is.null,end_date.gte.{today.isoformat()})"
+            )
+        )
+
         if event_type:
             query = query.eq("event_type", event_type)
-        
-        # Execute - get extra to allow for filtering
-        result = query.order("deadline_date").limit(limit * 2).execute()
-        
-        if not result.data:
+
+        # Fetch extra rows to allow selector filtering while still keeping payload bounded.
+        fetch_limit = min(max(limit * 12, 120), 600)
+        result = query.order("deadline_date").limit(fetch_limit).execute()
+        rows = result.data or []
+        if not rows:
             return []
-        
-        # Get user's dismissed deadlines (single query)
+
+        # Get user's dismissed deadlines.
         dismissed_result = client.table("user_deadline_interactions").select(
             "deadline_id"
         ).eq(
@@ -160,76 +390,140 @@ async def get_upcoming_deadlines(
         ).eq(
             "interaction_type", "dismissed"
         ).execute()
-        
+
         dismissed_ids = {d["deadline_id"] for d in (dismissed_result.data or [])}
-        
-        # Filter, enhance, and collect
-        deadlines = []
-        for dl in result.data:
-            # Skip dismissed
+
+        # Fetch document metadata once for fallback selector matching + semester filtering.
+        document_ids = sorted({row.get("document_id") for row in rows if row.get("document_id")})
+        doc_meta_by_id: dict[str, dict] = {}
+        if document_ids:
+            documents_result = (
+                client.table("documents")
+                .select("id,stream,department,year,semester")
+                .in_("id", document_ids)
+                .execute()
+            )
+            for doc in documents_result.data or []:
+                doc_meta_by_id[str(doc["id"])] = doc
+
+        deadlines: list[dict] = []
+        for dl in rows:
             if dl["id"] in dismissed_ids:
                 continue
-            
-            # Apply targeting filters
-            if stream and dl.get("target_streams") and stream not in dl["target_streams"]:
+
+            doc_meta = doc_meta_by_id.get(str(dl.get("document_id")), {})
+            target_streams = _normalize_string_list(dl.get("target_streams"))
+            target_departments = _normalize_string_list(dl.get("target_departments"))
+            target_years = _normalize_int_list(dl.get("target_years"))
+
+            if not _matches_stream_filter(
+                target_streams,
+                stream,
+                doc_meta.get("stream"),
+            ):
                 continue
-            if department and dl.get("target_departments") and department not in dl["target_departments"]:
+            if not _matches_department_filter(
+                target_departments,
+                department,
+                doc_meta.get("department"),
+            ):
                 continue
-            if year and dl.get("target_years") and year not in dl["target_years"]:
+            if not _matches_year_filter(target_years, year, doc_meta.get("year")):
                 continue
-            
-            # Calculate days remaining and smart score
+            if not _matches_semester_filter(
+                _get_document_semester(doc_meta.get("semester")),
+                semester,
+            ):
+                continue
+
             deadline_date = datetime.strptime(dl["deadline_date"], "%Y-%m-%d").date()
-            days_remaining = (deadline_date - today).days
-            
-            smart_score = calculate_smart_score(
-                deadline_date=deadline_date,
-                event_type=dl.get("event_type", "other"),
-                priority=dl.get("priority", "normal")
-            )
-            
-            is_urgent = days_remaining <= 3 or dl.get("priority") in ["critical", "high"]
-            
-            # Calculate multi-day event properties
             end_date_str = dl.get("end_date")
-            is_multi_day = end_date_str is not None
-            duration_days = 1
-            if is_multi_day and end_date_str:
+            end_date = None
+            if end_date_str:
                 try:
                     end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
-                    duration_days = (end_date - deadline_date).days + 1
                 except ValueError:
-                    pass
-            
-            deadlines.append(DeadlineResponse(
-                id=dl["id"],
-                title=dl["title"],
-                description=dl.get("description"),
-                event_type=dl["event_type"],
-                deadline_date=dl["deadline_date"],
-                end_date=end_date_str,
-                deadline_time=dl.get("deadline_time"),
+                    end_date = None
+
+            # Ongoing multi-day events should not look overdue.
+            if end_date and deadline_date < today <= end_date:
+                score_date = today
+                days_remaining = 0
+            else:
+                score_date = deadline_date
+                days_remaining = (deadline_date - today).days
+
+            smart_score = calculate_smart_score(
+                deadline_date=score_date,
+                event_type=dl.get("event_type", "other"),
                 priority=dl.get("priority", "normal"),
-                days_remaining=days_remaining,
-                is_urgent=is_urgent,
-                is_multi_day=is_multi_day,
-                duration_days=duration_days,
-                smart_score=smart_score,
-                target_streams=dl.get("target_streams", []),
-                target_departments=dl.get("target_departments", []),
-                target_years=dl.get("target_years", []),
-                document_id=dl.get("document_id"),
-                circular_id=dl.get("circular_id")
-            ))
-            
-            if len(deadlines) >= limit:
-                break
-        
-        # Sort by smart score (highest first)
-        deadlines.sort(key=lambda d: d.smart_score, reverse=True)
-        
-        return deadlines
-        
+                reference_date=today,
+            )
+
+            is_urgent = days_remaining <= 3 or dl.get("priority") in ["critical", "high"]
+
+            is_multi_day = end_date is not None
+            duration_days = 1
+            if is_multi_day and end_date:
+                duration_days = max((end_date - deadline_date).days + 1, 1)
+
+            deadline_payload: dict = {
+                "id": dl["id"],
+                "title": dl["title"],
+                "description": dl.get("description"),
+                "event_type": dl["event_type"],
+                "deadline_date": dl["deadline_date"],
+                "end_date": end_date_str,
+                "deadline_time": dl.get("deadline_time"),
+                "priority": dl.get("priority", "normal"),
+                "days_remaining": days_remaining,
+                "is_urgent": is_urgent,
+                "is_multi_day": is_multi_day,
+                "duration_days": duration_days,
+                "smart_score": smart_score,
+                "target_streams": target_streams,
+                "target_departments": target_departments,
+                "target_years": target_years,
+                "document_id": dl.get("document_id"),
+                "circular_id": dl.get("circular_id"),
+            }
+            deadline_payload["series_key"] = _build_series_key(deadline_payload)
+            deadlines.append(deadline_payload)
+
+        # Annotate series positions for repeated events.
+        series_groups: dict[str, list[dict]] = {}
+        for item in deadlines:
+            series_key = item.get("series_key")
+            if not series_key:
+                continue
+            series_groups.setdefault(series_key, []).append(item)
+
+        for series_key, items in series_groups.items():
+            items.sort(
+                key=lambda item: (
+                    item.get("deadline_date", ""),
+                    item.get("end_date") or "",
+                    item.get("title") or "",
+                )
+            )
+            total = len(items)
+            for idx, item in enumerate(items):
+                item["series_key"] = series_key
+                item["series_total"] = total
+                item["series_occurrence"] = idx + 1
+                item["is_series_start"] = idx == 0
+                item["is_series_end"] = idx == total - 1
+
+        deadlines.sort(
+            key=lambda item: (
+                -item["smart_score"],
+                item["deadline_date"],
+                item.get("title", ""),
+            )
+        )
+
+        return [DeadlineResponse(**item) for item in deadlines[:limit]]
+
     except Exception as e:
         logger.error(f"Error getting upcoming deadlines: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -239,7 +533,7 @@ async def get_upcoming_deadlines(
 async def interact_with_deadline(
     deadline_id: str,
     interaction: DeadlineInteraction,
-    user_id: str = Query(..., description="User identifier")
+    current_user: dict = Depends(require_auth),
 ):
     """
     Record a user interaction with a deadline (dismiss, complete, snooze).
@@ -253,6 +547,10 @@ async def interact_with_deadline(
                 status_code=400, 
                 detail=f"Invalid interaction type. Must be one of: {valid_types}"
             )
+
+        user_identifier = current_user.get("id")
+        if not user_identifier:
+            raise HTTPException(status_code=401, detail="Authentication required")
         
         # Verify deadline exists
         deadline = client.table("deadlines").select("id").eq("id", deadline_id).single().execute()
@@ -262,7 +560,7 @@ async def interact_with_deadline(
         # Upsert interaction (delete old, insert new)
         interaction_data = {
             "deadline_id": deadline_id,
-            "user_identifier": user_id,
+            "user_identifier": user_identifier,
             "interaction_type": interaction.interaction_type,
         }
         
@@ -273,7 +571,7 @@ async def interact_with_deadline(
         client.table("user_deadline_interactions").delete().eq(
             "deadline_id", deadline_id
         ).eq(
-            "user_identifier", user_id
+            "user_identifier", user_identifier
         ).eq(
             "interaction_type", interaction.interaction_type
         ).execute()
@@ -401,49 +699,140 @@ def register_deadlines_from_document(
         Number of deadlines registered
     """
     client = get_supabase_admin_client()
-    
+
+    def _clean_date_value(raw: Optional[str]) -> Optional[str]:
+        if not raw:
+            return None
+        value = str(raw).strip()
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+            return value
+        except ValueError:
+            return None
+
+    def _clean_time_value(raw: Optional[str]) -> Optional[str]:
+        if not raw:
+            return None
+        value = str(raw).strip()
+        for fmt in ("%H:%M", "%H:%M:%S"):
+            try:
+                parsed = datetime.strptime(value, fmt)
+                return parsed.strftime("%H:%M")
+            except ValueError:
+                continue
+        return None
+
     try:
-        # Extract events using AI
-        extracted = extract_deadlines_from_text(document_text)
-        
-        if not extracted:
+        segments = _build_extraction_segments(document_text)
+        if not segments:
+            logger.info(f"No extractable content for document {document_id}")
+            return 0
+
+        # Extract events from selected segments and de-duplicate at extraction level.
+        extracted_events: list[dict] = []
+        seen_extracted_signatures: set[str] = set()
+        for segment in segments:
+            segment_events = extract_deadlines_from_text(segment)
+            for event in segment_events:
+                signature = _event_signature(event)
+                if signature in seen_extracted_signatures:
+                    continue
+                seen_extracted_signatures.add(signature)
+                extracted_events.append(event)
+
+        if not extracted_events:
             logger.info(f"No events extracted from document {document_id}")
             return 0
-        
-        # Insert each event
-        inserted_count = 0
-        for event in extracted:
-            try:
-                deadline_data = {
-                    "org_id": org_id,
-                    "circular_id": circular_id,
-                    "document_id": document_id,
-                    "title": event["title"][:100],
-                    "description": event.get("description", "")[:500],
-                    "event_type": event.get("event_type", "other"),
-                    "deadline_date": event["deadline_date"],
-                    "end_date": event.get("end_date"),  # For multi-day events
-                    "deadline_time": event.get("deadline_time"),
-                    "is_all_day": event.get("deadline_time") is None,
-                    "target_streams": event.get("target_streams", []),
-                    "target_departments": event.get("target_departments", []),
-                    "target_years": event.get("target_years", []),
-                    "priority": event.get("priority", "normal"),
-                    "status": "active",
-                    "confidence_score": event.get("confidence", 0.5),
-                    "extracted_text": event.get("extracted_text", "")[:500]
-                }
-                
-                client.table("deadlines").insert(deadline_data).execute()
-                inserted_count += 1
-                
-            except Exception as e:
-                logger.error(f"Failed to insert event '{event.get('title', 'unknown')}': {e}")
+
+        # Existing signatures for this document, so re-runs don't create duplicates.
+        existing_result = (
+            client.table("deadlines")
+            .select(
+                "title,event_type,deadline_date,end_date,deadline_time,"
+                "target_streams,target_departments,target_years"
+            )
+            .eq("org_id", org_id)
+            .eq("document_id", document_id)
+            .execute()
+        )
+        existing_signatures = {
+            _build_deadline_signature(row)
+            for row in (existing_result.data or [])
+        }
+
+        doc_meta_result = (
+            client.table("documents")
+            .select("stream,department,year")
+            .eq("id", document_id)
+            .maybe_single()
+            .execute()
+        )
+        doc_meta = doc_meta_result.data or {}
+        fallback_streams = _parse_csv_tokens(doc_meta.get("stream"))
+        fallback_departments = _parse_csv_tokens(doc_meta.get("department"))
+        fallback_years = _parse_year_tokens(doc_meta.get("year"))
+
+        payloads: list[dict] = []
+        for event in extracted_events:
+            deadline_date = _clean_date_value(event.get("deadline_date"))
+            if not deadline_date:
                 continue
-        
+
+            end_date = _clean_date_value(event.get("end_date"))
+            if end_date and end_date < deadline_date:
+                end_date = None
+
+            deadline_time = _clean_time_value(event.get("deadline_time"))
+            target_streams = _normalize_string_list(event.get("target_streams")) or fallback_streams
+            target_departments = _normalize_string_list(event.get("target_departments")) or fallback_departments
+            target_years = _normalize_int_list(event.get("target_years")) or fallback_years
+
+            deadline_data = {
+                "org_id": org_id,
+                "circular_id": circular_id,
+                "document_id": document_id,
+                "title": (event.get("title") or "Untitled Event")[:100],
+                "description": str(event.get("description") or "")[:500],
+                "event_type": event.get("event_type", "other"),
+                "deadline_date": deadline_date,
+                "end_date": end_date,
+                "deadline_time": deadline_time,
+                "is_all_day": deadline_time is None,
+                "target_streams": target_streams,
+                "target_departments": target_departments,
+                "target_years": target_years,
+                "priority": event.get("priority", "normal"),
+                "status": "active",
+                "confidence_score": event.get("confidence", 0.5),
+                "extracted_text": str(event.get("extracted_text") or "")[:500],
+            }
+
+            signature = _build_deadline_signature(deadline_data)
+            if signature in existing_signatures:
+                continue
+            existing_signatures.add(signature)
+            payloads.append(deadline_data)
+
+        if not payloads:
+            logger.info(f"No new deadlines to register for document {document_id}")
+            return 0
+
+        inserted_count = 0
+        try:
+            client.table("deadlines").insert(payloads).execute()
+            inserted_count = len(payloads)
+        except Exception as batch_error:
+            logger.warning(f"Batch insert failed for document {document_id}: {batch_error}")
+            for payload in payloads:
+                try:
+                    client.table("deadlines").insert(payload).execute()
+                    inserted_count += 1
+                except Exception as row_error:
+                    logger.error(f"Failed to insert event '{payload.get('title', 'unknown')}': {row_error}")
+
         logger.info(f"Registered {inserted_count} events from document {document_id}")
         return inserted_count
-        
+
     except Exception as e:
         logger.error(f"Error registering events from document: {e}")
         return 0
