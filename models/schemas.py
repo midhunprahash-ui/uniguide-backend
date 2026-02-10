@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime
 
 # Valid categories for document classification
@@ -29,6 +29,10 @@ class EventDiscoverQuery(BaseModel):
     nearby_location: Optional[str] = None
     nearby_lat: Optional[float] = None
     nearby_lng: Optional[float] = None
+    category_hint: Literal[
+        "all", "hackathons", "internships", "conferences", "scholarships", "jobs"
+    ] = "all"
+    strict_trust: bool = True
 
 class SaveEventRequest(BaseModel):
     name: str
@@ -41,6 +45,10 @@ class SaveEventRequest(BaseModel):
     url: Optional[str] = None
     source_url: Optional[str] = None
     status: Optional[str] = None
+    prize_type: Optional[str] = None
+    cash_prize_amount: Optional[float] = None
+    cash_prize_currency: Optional[str] = None
+    prize_display_text: Optional[str] = None
     event_key: Optional[str] = None
 
 class AdminLogin(BaseModel):
