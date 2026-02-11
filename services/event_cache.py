@@ -25,7 +25,7 @@ class CachedEvents:
 
 class EventCache:
     def __init__(self, ttl_hours: int = 6, max_entries: int = 1000):
-        self.cache_version = "v3"
+        self.cache_version = "v4"
         self.ttl = timedelta(hours=ttl_hours)
         self.max_entries = max_entries
         self._cache: dict[str, CachedEvents] = {}
@@ -48,6 +48,8 @@ class EventCache:
         nearby_lng: float | None,
         category_hint: str,
         strict_trust: bool,
+        accuracy_mode: str,
+        geo_scope: str,
     ) -> str:
         normalized = query.lower().strip()
         loc = (nearby_location or "").lower().strip()
@@ -55,7 +57,8 @@ class EventCache:
         lng = "" if nearby_lng is None else f"{nearby_lng:.6f}"
         key_parts = (
             f"{self.cache_version}:{org_id}:{normalized}:{nearby}:{loc}:{lat}:{lng}:"
-            f"{(category_hint or 'all').lower()}:{strict_trust}"
+            f"{(category_hint or 'all').lower()}:{strict_trust}:"
+            f"{(accuracy_mode or 'max').lower()}:{(geo_scope or 'state_remote').lower()}"
         )
         return hashlib.sha256(key_parts.encode()).hexdigest()[:24]
 
@@ -139,6 +142,8 @@ class EventCache:
         nearby_lng: float | None,
         category_hint: str,
         strict_trust: bool,
+        accuracy_mode: str,
+        geo_scope: str,
     ) -> CachedEvents | None:
         cache_key = self._compute_key(
             query,
@@ -149,6 +154,8 @@ class EventCache:
             nearby_lng,
             category_hint,
             strict_trust,
+            accuracy_mode,
+            geo_scope,
         )
 
         cached = self._get_supabase(cache_key)
@@ -168,6 +175,8 @@ class EventCache:
         nearby_lng: float | None,
         category_hint: str,
         strict_trust: bool,
+        accuracy_mode: str,
+        geo_scope: str,
         events: list[dict],
         citations: list[dict],
     ) -> None:
@@ -180,6 +189,8 @@ class EventCache:
             nearby_lng,
             category_hint,
             strict_trust,
+            accuracy_mode,
+            geo_scope,
         )
         now = datetime.now(UTC)
         expires_at = now + self.ttl

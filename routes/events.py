@@ -10,6 +10,7 @@ from services.event_cache import event_cache
 from services.event_discovery import get_event_discovery
 from services.event_store import event_store
 from services.event_utils import enrich_event_payload
+from services.provider_error_mapper import map_provider_error, provider_error_sse_payload
 from services.rate_limiter import RATE_LIMITS, get_org_key, limiter
 
 logger = logging.getLogger(__name__)
@@ -48,16 +49,28 @@ async def discover_events_stream(
             query.nearby_lng,
             query.category_hint,
             query.strict_trust,
+            query.accuracy_mode,
+            query.geo_scope,
         )
         try:
             discovery = get_event_discovery()
         except RuntimeError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+            logger.error("Event discovery initialization failed: %s", e)
+            raise HTTPException(
+                status_code=503,
+                detail="Event discovery is temporarily unavailable. Please try again later.",
+            )
 
         async def event_generator():
             try:
                 if cached:
-                    policy = discovery.evaluate_policy(query.question, query.category_hint).to_payload()
+                    policy = discovery.evaluate_policy(
+                        query.question,
+                        query.category_hint,
+                        nearby=query.nearby,
+                        nearby_location=query.nearby_location,
+                        geo_scope=query.geo_scope,
+                    ).to_payload()
                     yield f"data: {json.dumps({'type': 'policy', 'data': policy})}\n\n"
                     if not policy.get("allowed", False):
                         yield f"data: {json.dumps({'type': 'done', 'data': True})}\n\n"
@@ -69,6 +82,7 @@ async def discover_events_stream(
                         query.nearby,
                         query.nearby_location,
                         max_results,
+                        policy.get("intent_context"),
                     )
                     yield f"data: {json.dumps({'type': 'search_plan', 'data': search_plan})}\n\n"
 
@@ -103,6 +117,8 @@ async def discover_events_stream(
                     nearby_lng=query.nearby_lng,
                     category_hint=query.category_hint,
                     strict_trust=query.strict_trust,
+                    accuracy_mode=query.accuracy_mode,
+                    geo_scope=query.geo_scope,
                 ):
                     if kind == "citation":
                         citations.append(data)
@@ -125,6 +141,8 @@ async def discover_events_stream(
                         query.nearby_lng,
                         query.category_hint,
                         query.strict_trust,
+                        query.accuracy_mode,
+                        query.geo_scope,
                         events=events,
                         citations=citations,
                     )
@@ -132,14 +150,28 @@ async def discover_events_stream(
                 yield f"data: {json.dumps({'type': 'done', 'data': True})}\n\n"
 
             except Exception as e:
-                logger.error("Event discovery stream error: %s", e)
-                error_json = json.dumps({"type": "error", "data": str(e)})
+                logger.exception("Event discovery stream error")
+                error_json = json.dumps(
+                    provider_error_sse_payload(
+                        e,
+                        fallback_message=(
+                            "We could not complete event discovery right now. Please try again shortly."
+                        ),
+                    )
+                )
                 yield f"data: {error_json}\n\n"
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error starting event discovery: {str(e)}")
+        logger.exception("Failed to start event discovery")
+        mapped = map_provider_error(
+            e,
+            fallback_message="Unable to start event discovery right now. Please try again shortly.",
+        )
+        raise HTTPException(status_code=mapped.status_code, detail=mapped.message)
 
 
 @router.get("/saved")

@@ -1,6 +1,7 @@
-from pydantic import BaseModel
-from typing import Optional, List, Literal
 from datetime import datetime
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel
 
 # Valid categories for document classification
 VALID_CATEGORIES = ['rules', 'admissions', 'schedules', 'timetables', 'abhs', 'circulars']
@@ -33,6 +34,8 @@ class EventDiscoverQuery(BaseModel):
         "all", "hackathons", "internships", "conferences", "scholarships", "jobs"
     ] = "all"
     strict_trust: bool = True
+    accuracy_mode: Literal["fast", "balanced", "max"] = "max"
+    geo_scope: Literal["state_remote", "strict_state", "soft"] = "state_remote"
 
 class SaveEventRequest(BaseModel):
     name: str
@@ -49,6 +52,16 @@ class SaveEventRequest(BaseModel):
     cash_prize_amount: Optional[float] = None
     cash_prize_currency: Optional[str] = None
     prize_display_text: Optional[str] = None
+    prize_confidence: Optional[float] = None
+    registration_fee_text: Optional[str] = None
+    registration_fee_amount: Optional[float] = None
+    registration_fee_currency: Optional[str] = None
+    location_confidence: Optional[float] = None
+    resolved_region: Optional[str] = None
+    is_remote: Optional[bool] = None
+    geo_match: Optional[str] = None
+    summary_structured: Optional[dict] = None
+    evidence: Optional[List[dict]] = None
     event_key: Optional[str] = None
 
 class AdminLogin(BaseModel):
