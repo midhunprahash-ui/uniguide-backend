@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 
 from models.schemas import ChatResponse, CircularChatQuery
 from services.chat_sessions import session_manager
+from services.provider_error_mapper import map_provider_error
 from services.rag_engine import rag_engine
 from services.supabase_client import get_supabase_admin_client
 
@@ -253,5 +254,9 @@ async def chat_about_circular(query: CircularChatQuery):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error processing circular query: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing circular query: {str(e)}")
+        logger.exception("Error processing circular query")
+        mapped = map_provider_error(
+            e,
+            fallback_message="Unable to process your circular query right now. Please try again shortly.",
+        )
+        raise HTTPException(status_code=mapped.status_code, detail=mapped.message)

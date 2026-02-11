@@ -1,14 +1,15 @@
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from models.schemas import ChatQuery, ChatResponse
 from services.auth import require_auth, require_org_membership, require_valid_org_id
 from services.chat_sessions import session_manager
+from services.provider_error_mapper import map_provider_error, provider_error_sse_payload
 from services.rag_engine import rag_engine
-from services.rate_limiter import limiter, RATE_LIMITS, get_org_key
+from services.rate_limiter import RATE_LIMITS, get_org_key, limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -168,10 +169,15 @@ async def query_chat_stream(request: Request, query: ChatQuery, current_user: di
                 )
                 
             except Exception as e:
-                import traceback
-                logger.error(f"Stream error: {e}")
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                error_json = json.dumps({"type": "error", "data": f"Error: {str(e)}"})
+                logger.exception("Chat stream error")
+                error_json = json.dumps(
+                    provider_error_sse_payload(
+                        e,
+                        fallback_message=(
+                            "We could not generate a response right now. Please try again shortly."
+                        ),
+                    )
+                )
                 yield f"data: {error_json}\n\n"
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -179,7 +185,12 @@ async def query_chat_stream(request: Request, query: ChatQuery, current_user: di
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error starting stream: {str(e)}")
+        logger.exception("Failed to start chat stream")
+        mapped = map_provider_error(
+            e,
+            fallback_message="Unable to start chat right now. Please try again shortly.",
+        )
+        raise HTTPException(status_code=mapped.status_code, detail=mapped.message)
 
 
 @router.post("/query", response_model=ChatResponse)
@@ -263,4 +274,9 @@ async def query_chat(request: Request, query: ChatQuery, current_user: dict = De
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+        logger.exception("Failed to process chat query")
+        mapped = map_provider_error(
+            e,
+            fallback_message="Unable to process your query right now. Please try again shortly.",
+        )
+        raise HTTPException(status_code=mapped.status_code, detail=mapped.message)

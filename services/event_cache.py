@@ -5,8 +5,8 @@ import hashlib
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from services.supabase_client import get_supabase_admin_client
 
@@ -25,11 +25,12 @@ class CachedEvents:
 
 class EventCache:
     def __init__(self, ttl_hours: int = 6, max_entries: int = 1000):
+        self.cache_version = "v4"
         self.ttl = timedelta(hours=ttl_hours)
         self.max_entries = max_entries
         self._cache: dict[str, CachedEvents] = {}
         self._lock = threading.RLock()
-        self._client = None
+        self._client: Any = None
 
     @property
     def client(self):
@@ -45,12 +46,20 @@ class EventCache:
         nearby_location: str | None,
         nearby_lat: float | None,
         nearby_lng: float | None,
+        category_hint: str,
+        strict_trust: bool,
+        accuracy_mode: str,
+        geo_scope: str,
     ) -> str:
         normalized = query.lower().strip()
         loc = (nearby_location or "").lower().strip()
         lat = "" if nearby_lat is None else f"{nearby_lat:.6f}"
         lng = "" if nearby_lng is None else f"{nearby_lng:.6f}"
-        key_parts = f"{org_id}:{normalized}:{nearby}:{loc}:{lat}:{lng}"
+        key_parts = (
+            f"{self.cache_version}:{org_id}:{normalized}:{nearby}:{loc}:{lat}:{lng}:"
+            f"{(category_hint or 'all').lower()}:{strict_trust}:"
+            f"{(accuracy_mode or 'max').lower()}:{(geo_scope or 'state_remote').lower()}"
+        )
         return hashlib.sha256(key_parts.encode()).hexdigest()[:24]
 
     def _is_expired(self, cached: CachedEvents) -> bool:
@@ -73,7 +82,7 @@ class EventCache:
         except Exception:
             return datetime.now()
 
-    def _get_memory(self, cache_key: str) -> Optional[CachedEvents]:
+    def _get_memory(self, cache_key: str) -> CachedEvents | None:
         with self._lock:
             cached = self._cache.get(cache_key)
             if not cached:
@@ -90,9 +99,9 @@ class EventCache:
             self._evict_lru()
             self._cache[cache_key] = cached
 
-    def _get_supabase(self, cache_key: str) -> Optional[CachedEvents]:
+    def _get_supabase(self, cache_key: str) -> CachedEvents | None:
         try:
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             result = (
                 self.client.table("event_discover_cache")
                 .select("*")
@@ -131,8 +140,23 @@ class EventCache:
         nearby_location: str | None,
         nearby_lat: float | None,
         nearby_lng: float | None,
-    ) -> Optional[CachedEvents]:
-        cache_key = self._compute_key(query, org_id, nearby, nearby_location, nearby_lat, nearby_lng)
+        category_hint: str,
+        strict_trust: bool,
+        accuracy_mode: str,
+        geo_scope: str,
+    ) -> CachedEvents | None:
+        cache_key = self._compute_key(
+            query,
+            org_id,
+            nearby,
+            nearby_location,
+            nearby_lat,
+            nearby_lng,
+            category_hint,
+            strict_trust,
+            accuracy_mode,
+            geo_scope,
+        )
 
         cached = self._get_supabase(cache_key)
         if cached:
@@ -149,11 +173,26 @@ class EventCache:
         nearby_location: str | None,
         nearby_lat: float | None,
         nearby_lng: float | None,
+        category_hint: str,
+        strict_trust: bool,
+        accuracy_mode: str,
+        geo_scope: str,
         events: list[dict],
         citations: list[dict],
     ) -> None:
-        cache_key = self._compute_key(query, org_id, nearby, nearby_location, nearby_lat, nearby_lng)
-        now = datetime.now(timezone.utc)
+        cache_key = self._compute_key(
+            query,
+            org_id,
+            nearby,
+            nearby_location,
+            nearby_lat,
+            nearby_lng,
+            category_hint,
+            strict_trust,
+            accuracy_mode,
+            geo_scope,
+        )
+        now = datetime.now(UTC)
         expires_at = now + self.ttl
 
         payload = {

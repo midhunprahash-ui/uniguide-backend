@@ -33,6 +33,15 @@ class EventStore:
     def upsert_event(self, org_id: str, event: dict) -> tuple[str, str]:
         enriched = enrich_event_payload(event)
         now = datetime.now(timezone.utc).isoformat()
+        metadata = enriched.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if enriched.get("prize_type"):
+            metadata["prize_type"] = enriched.get("prize_type")
+        if enriched.get("cash_prize_currency"):
+            metadata["cash_prize_currency"] = enriched.get("cash_prize_currency")
+        if enriched.get("cash_prize_amount") is not None:
+            metadata["cash_prize_amount"] = enriched.get("cash_prize_amount")
 
         payload = {
             "org_id": org_id,
@@ -42,13 +51,13 @@ class EventStore:
             "end_date": enriched.get("end_date"),
             "date_text": enriched.get("date"),
             "location": enriched.get("location"),
-            "cash_prize": enriched.get("cash_prize"),
+            "cash_prize": enriched.get("cash_prize") or enriched.get("prize_display_text"),
             "short_description": enriched.get("short_description"),
             "url": enriched.get("url"),
             "source_url": enriched.get("source_url"),
             "source_domain": enriched.get("source_domain"),
             "status": enriched.get("status") or "unknown",
-            "metadata": enriched.get("metadata") or {},
+            "metadata": metadata,
             "updated_at": now,
         }
 

@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     gemini_api_key: str
     tavily_api_key: str | None = None
     event_discovery_gemini_budget: int = 3
+    event_discovery_confidence_threshold: float = 0.45
+    event_discovery_extractor_mode: str = "hybrid"
+    event_discovery_crawl4ai_max_urls: int = 6
+    event_discovery_crawl4ai_timeout_ms: int = 12000
+    event_discovery_crawl4ai_check_robots_txt: bool = True
 
     # Supabase Configuration
     supabase_url: str
