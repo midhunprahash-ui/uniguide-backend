@@ -4,16 +4,17 @@ Isolated from institutional chat (routes/chat.py).
 """
 import json
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
 
 from services.auth import require_auth, require_org_membership, require_valid_org_id
 from services.chat_sessions import session_manager
 from services.notes_rag_engine import notes_rag_engine
-from services.rate_limiter import limiter, RATE_LIMITS, get_org_key
+from services.provider_error_mapper import map_provider_error, provider_error_sse_payload
+from services.rate_limiter import RATE_LIMITS, get_org_key, limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -39,6 +40,87 @@ class NotesResponse(BaseModel):
     chunks_used: int
     session_id: str
     subject: Optional[dict] = None
+
+
+def _resolve_notes_context_key(query: "NotesQuery") -> str:
+    """Build a stable context key for notes chat thread reuse."""
+    explicit_context_key = session_manager.normalize_context_key(query.context_key)
+    if explicit_context_key:
+        return explicit_context_key
+
+    if query.subject_id:
+        unit_part = (query.unit_id or "subject").strip().lower()
+        return f"note_{query.subject_id}_{unit_part}".lower()
+
+    return "notes"
+
+
+def _resolve_notes_session_id(query: "NotesQuery", user_id: str | None) -> str:
+    """
+    Resolve notes session id with ChatGPT-style thread reuse semantics.
+
+    Priority:
+    1) valid requested session id owned by the user
+    2) latest existing notes session for user/org/context key
+    3) create a new notes session
+    """
+    context_key = _resolve_notes_context_key(query)
+    requested_session_id = query.session_id
+
+    if requested_session_id:
+        existing_session = session_manager.get_session(requested_session_id)
+        if existing_session:
+            if not session_manager.get_session_for_user(
+                requested_session_id,
+                org_id=query.org_id,
+                user_id=user_id,
+            ):
+                raise HTTPException(status_code=403, detail="Access denied for session")
+
+            existing_context_key = session_manager.normalize_context_key(
+                existing_session.get("context_key"),
+                existing_session.get("category"),
+            )
+            if not existing_context_key or existing_context_key == context_key:
+                return requested_session_id
+
+            logger.info(
+                "Requested notes session context mismatch; using current context thread user_id=%s "
+                "org_id=%s requested_session_id=%s requested_context=%s active_context=%s",
+                user_id,
+                query.org_id,
+                requested_session_id,
+                existing_context_key,
+                context_key,
+            )
+
+        logger.info(
+            "Requested notes session not found; trying context reuse user_id=%s org_id=%s "
+            "requested_session_id=%s context_key=%s",
+            user_id,
+            query.org_id,
+            requested_session_id,
+            context_key,
+        )
+
+    if user_id and context_key:
+        reusable_session = session_manager.get_latest_session_for_context(
+            user_id=user_id,
+            org_id=query.org_id,
+            context_key=context_key,
+            category="notes",
+        )
+        if reusable_session and reusable_session.get("id"):
+            return reusable_session["id"]
+
+    return session_manager.create_session(
+        category="notes",
+        year=query.year_id,
+        department=None,
+        org_id=query.org_id,
+        user_id=user_id,
+        context_key=context_key,
+    )
 
 
 # ============================================================================
@@ -91,41 +173,8 @@ async def query_notes_stream(
         # CRITICAL: Validate org_id
         require_valid_org_id(query.org_id)
         require_org_membership(current_user.get("id"), query.org_id)
-        
-        # Get or create session
-        session_id = query.session_id
-        if session_id:
-            existing_session = session_manager.get_session(session_id)
-            if not existing_session:
-                context_key = query.context_key
-                if not context_key and query.subject_id:
-                    context_key = f"note_{query.subject_id}_{query.unit_id or 'subject'}"
-                session_id = session_manager.create_session(
-                    category="notes",  # Special category for notes
-                    year=query.year_id,
-                    department=None,
-                    org_id=query.org_id,
-                    user_id=current_user.get("id"),
-                    context_key=context_key,
-                )
-            elif not session_manager.get_session_for_user(
-                session_id,
-                org_id=query.org_id,
-                user_id=current_user.get("id"),
-            ):
-                raise HTTPException(status_code=403, detail="Access denied for session")
-        else:
-            context_key = query.context_key
-            if not context_key and query.subject_id:
-                context_key = f"note_{query.subject_id}_{query.unit_id or 'subject'}"
-            session_id = session_manager.create_session(
-                category="notes",  # Special category for notes
-                year=query.year_id,
-                department=None,
-                org_id=query.org_id,
-                user_id=current_user.get("id"),
-                context_key=context_key,
-            )
+
+        session_id = _resolve_notes_session_id(query, current_user.get("id"))
         
         # Store user question
         session_manager.add_message(session_id, "user", query.question)
@@ -167,8 +216,15 @@ async def query_notes_stream(
                 )
                 
             except Exception as e:
-                logger.error(f"Notes stream error: {e}")
-                error_json = json.dumps({"type": "error", "data": "Error generating response."})
+                logger.exception("Notes stream error")
+                error_json = json.dumps(
+                    provider_error_sse_payload(
+                        e,
+                        fallback_message=(
+                            "We could not generate a response right now. Please try again shortly."
+                        ),
+                    )
+                )
                 yield f"data: {error_json}\n\n"
         
         return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -176,7 +232,12 @@ async def query_notes_stream(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error starting stream: {str(e)}")
+        logger.exception("Failed to start notes stream")
+        mapped = map_provider_error(
+            e,
+            fallback_message="Unable to start notes chat right now. Please try again shortly.",
+        )
+        raise HTTPException(status_code=mapped.status_code, detail=mapped.message)
 
 
 @router.post("/query", response_model=NotesResponse)
@@ -191,41 +252,8 @@ async def query_notes(request: Request, query: NotesQuery, current_user: dict = 
         # CRITICAL: Validate org_id
         require_valid_org_id(query.org_id)
         require_org_membership(current_user.get("id"), query.org_id)
-        
-        # Get or create session
-        session_id = query.session_id
-        if session_id:
-            existing_session = session_manager.get_session(session_id)
-            if not existing_session:
-                context_key = query.context_key
-                if not context_key and query.subject_id:
-                    context_key = f"note_{query.subject_id}_{query.unit_id or 'subject'}"
-                session_id = session_manager.create_session(
-                    category="notes",
-                    year=query.year_id,
-                    department=None,
-                    org_id=query.org_id,
-                    user_id=current_user.get("id"),
-                    context_key=context_key,
-                )
-            elif not session_manager.get_session_for_user(
-                session_id,
-                org_id=query.org_id,
-                user_id=current_user.get("id"),
-            ):
-                raise HTTPException(status_code=403, detail="Access denied for session")
-        else:
-            context_key = query.context_key
-            if not context_key and query.subject_id:
-                context_key = f"note_{query.subject_id}_{query.unit_id or 'subject'}"
-            session_id = session_manager.create_session(
-                category="notes",
-                year=query.year_id,
-                department=None,
-                org_id=query.org_id,
-                user_id=current_user.get("id"),
-                context_key=context_key,
-            )
+
+        session_id = _resolve_notes_session_id(query, current_user.get("id"))
         
         # Store user question
         session_manager.add_message(session_id, "user", query.question)
@@ -262,7 +290,12 @@ async def query_notes(request: Request, query: NotesQuery, current_user: dict = 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+        logger.exception("Failed to process notes query")
+        mapped = map_provider_error(
+            e,
+            fallback_message="Unable to process your notes query right now. Please try again shortly.",
+        )
+        raise HTTPException(status_code=mapped.status_code, detail=mapped.message)
 
 
 # ============================================================================

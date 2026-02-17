@@ -3,15 +3,16 @@ import logging
 import google.generativeai as genai
 
 from config import get_settings
-from services.vector_store import vector_store
-from services.supabase_client import get_supabase_admin_client
+from services.hybrid_search import hybrid_search
+from services.prompt_security import prompt_guard
+from services.provider_error_mapper import provider_error_sse_payload
 
 # Enhanced RAG components
-from services.query_processor import query_processor, QueryIntent
-from services.hybrid_search import hybrid_search, HybridSearchResult
+from services.query_processor import QueryIntent, query_processor
 from services.reranker import reranker
-from services.prompt_security import prompt_guard
 from services.response_cache import response_cache
+from services.supabase_client import get_supabase_admin_client
+from services.vector_store import vector_store
 
 settings = get_settings()
 genai.configure(api_key=settings.gemini_api_key)
@@ -1009,10 +1010,15 @@ Answer:"""
             return full_answer # Return for caller if needed (e.g. to save to history)
             
         except Exception as e:
-            import traceback
-            logger.error(f"Streaming error: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            yield json.dumps({"type": "error", "data": f"Error generating response: {str(e)}"})
+            logger.exception("Streaming error in RAG query")
+            yield json.dumps(
+                provider_error_sse_payload(
+                    e,
+                    fallback_message=(
+                        "We could not generate a response right now. Please try again shortly."
+                    ),
+                )
+            )
 
 # Singleton instance
 rag_engine = RAGEngine()

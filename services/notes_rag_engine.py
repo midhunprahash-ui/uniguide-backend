@@ -3,13 +3,14 @@ Notes RAG Engine for academic notes.
 Completely isolated from the institutional RAG (RAGEngine).
 Uses match_notes function to query note_chunks table.
 """
-import logging
 import json
+import logging
 
 import google.generativeai as genai
 
 from config import get_settings
 from services.notes_vector_store import notes_vector_store
+from services.provider_error_mapper import provider_error_sse_payload
 from services.supabase_client import get_supabase_admin_client
 
 settings = get_settings()
@@ -349,13 +350,15 @@ Provide a helpful, educational response based on the notes content above.
             })
             
         except Exception as e:
-            import traceback
-            logger.error(f"Error in streaming response: {e}")
-            logger.error(f"Full traceback: {traceback.format_exc()}")
-            yield json.dumps({
-                "type": "error",
-                "data": f"Error generating response: {str(e)}"
-            })
+            logger.exception("Error in notes streaming response")
+            yield json.dumps(
+                provider_error_sse_payload(
+                    e,
+                    fallback_message=(
+                        "We could not generate a response right now. Please try again shortly."
+                    ),
+                )
+            )
 
 
 # Singleton instance
