@@ -9,14 +9,28 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
-from config import get_settings
-from routes import admin, chat, circular, categories, departments, organizations, streams, years, health, events, auth
-from routes import subjects, notes_admin, notes_chat  # Notes RAG
-from routes import deadlines  # Smart Calendar & Deadline Assassin
-from services.rate_limiter import limiter
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+
+from config import get_settings
+from routes import (  # Notes RAG
+    admin,
+    auth,
+    categories,
+    chat,
+    circular,
+    deadlines,  # Smart Calendar & Deadline Assassin
+    departments,
+    events,
+    health,
+    notes_admin,
+    notes_chat,
+    organizations,
+    streams,
+    subjects,
+    years,
+)
+from services.rate_limiter import limiter
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -61,6 +75,11 @@ async def lifespan(app: FastAPI):
     logger.info("✅ Application started successfully")
     logger.info(f"📁 Upload directory: {settings.upload_directory}")
     logger.info("🗄️  Database: Supabase pgvector")
+    if not settings.has_valid_gemini_api_key:
+        logger.warning(
+            "⚠️ GEMINI_API_KEY is missing or still using the example placeholder. "
+            "AI chat features will fail until it is replaced with a real Google AI Studio key."
+        )
 
     yield
 
