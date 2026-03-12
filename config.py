@@ -3,6 +3,24 @@ from functools import lru_cache
 from pydantic_settings import BaseSettings
 
 
+def _looks_like_placeholder_secret(value: str | None) -> bool:
+    if not value:
+        return True
+
+    normalized = value.strip().lower()
+    if not normalized:
+        return True
+
+    placeholder_tokens = (
+        "your_",
+        "placeholder",
+        "changeme",
+        "example",
+        "test",
+    )
+    return any(token in normalized for token in placeholder_tokens)
+
+
 class Settings(BaseSettings):
     # API Keys
     gemini_api_key: str
@@ -31,6 +49,10 @@ class Settings(BaseSettings):
     # File Upload
     upload_directory: str = "./uploads"
     max_file_size_mb: int = 50
+
+    @property
+    def has_valid_gemini_api_key(self) -> bool:
+        return not _looks_like_placeholder_secret(self.gemini_api_key)
 
     class Config:
         env_file = ".env"

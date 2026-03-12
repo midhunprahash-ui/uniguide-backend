@@ -107,6 +107,19 @@ def map_provider_error(
             "504",
         )
     )
+    has_auth_signal = any(
+        token in text
+        for token in (
+            "permission denied",
+            "unauthorized",
+            "invalid api key",
+            "api key not valid",
+            "api_key_invalid",
+            "forbidden",
+            "403",
+            "401",
+        )
+    )
     has_invalid_signal = any(
         token in text
         for token in (
@@ -116,7 +129,7 @@ def map_provider_error(
             "malformed",
             "400",
         )
-    )
+    ) and not has_auth_signal
     has_safety_signal = any(
         token in text
         for token in (
@@ -125,18 +138,6 @@ def map_provider_error(
             "content policy",
             "prohibited",
             "disallowed",
-        )
-    )
-    has_auth_signal = any(
-        token in text
-        for token in (
-            "permission denied",
-            "unauthorized",
-            "invalid api key",
-            "api key not valid",
-            "forbidden",
-            "403",
-            "401",
         )
     )
 
@@ -167,22 +168,6 @@ def map_provider_error(
             retryable=True,
         )
 
-    if _is_google_exception(error, "InvalidArgument") or has_invalid_signal:
-        return UserFacingProviderError(
-            message=INVALID_REQUEST_MESSAGE,
-            code="provider_invalid_request",
-            status_code=400,
-            retryable=False,
-        )
-
-    if has_safety_signal:
-        return UserFacingProviderError(
-            message=CONTENT_BLOCKED_MESSAGE,
-            code="provider_content_blocked",
-            status_code=400,
-            retryable=False,
-        )
-
     if any(_is_google_exception(error, name) for name in ("PermissionDenied", "Unauthorized")):
         return UserFacingProviderError(
             message=SERVICE_CONFIG_MESSAGE,
@@ -196,6 +181,22 @@ def map_provider_error(
             message=SERVICE_CONFIG_MESSAGE,
             code="provider_auth_error",
             status_code=503,
+            retryable=False,
+        )
+
+    if _is_google_exception(error, "InvalidArgument") or has_invalid_signal:
+        return UserFacingProviderError(
+            message=INVALID_REQUEST_MESSAGE,
+            code="provider_invalid_request",
+            status_code=400,
+            retryable=False,
+        )
+
+    if has_safety_signal:
+        return UserFacingProviderError(
+            message=CONTENT_BLOCKED_MESSAGE,
+            code="provider_content_blocked",
+            status_code=400,
             retryable=False,
         )
 

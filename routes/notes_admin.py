@@ -6,23 +6,42 @@ import logging
 import os
 import uuid as uuid_module
 from datetime import datetime
-from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from services.document_processor import document_processor
+from services.notes_rag_engine import notes_rag_engine
+from services.notes_vector_store import notes_vector_store
+from services.rag_engine import rag_engine
+from services.storage_paths import build_object_key, sanitize_filename
 from services.supabase_auth import require_admin
 from services.supabase_client import get_supabase_admin_client
-from services.document_processor import document_processor
-from services.rag_engine import rag_engine
-from services.notes_vector_store import notes_vector_store
-from services.storage_paths import build_object_key, sanitize_filename
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Notes storage bucket name
 NOTES_BUCKET = "notes"
+
+
+def cleanup_failed_note_upload(note_id: str | None, file_path: str | None) -> None:
+    """Best-effort cleanup for partially created note uploads."""
+    client = get_supabase_admin_client()
+
+    if note_id:
+        try:
+            notes_vector_store.delete_note_chunks(note_id)
+        except Exception as exc:
+            logger.warning(f"Failed to cleanup note chunks for {note_id}: {exc}")
+
+        try:
+            client.table("notes").delete().eq("id", note_id).execute()
+        except Exception as exc:
+            logger.warning(f"Failed to cleanup note record {note_id}: {exc}")
+
+    if file_path:
+        delete_note_from_storage(file_path)
 
 
 def upload_note_to_storage(file_path: str, file_content: bytes, content_type: str) -> bool:
@@ -73,6 +92,51 @@ def delete_note_from_storage(file_path: str) -> bool:
         return False
 
 
+def extract_note_text(file_path: str, content_type: str | None) -> str:
+    """Extract text from a note file based on its content type."""
+    normalized_content_type = (content_type or "").lower()
+
+    if normalized_content_type == "application/pdf":
+        return document_processor.process_pdf(file_path)
+
+    if normalized_content_type in {"image/png", "image/jpeg", "image/jpg", "image/webp"}:
+        return document_processor.process_image(file_path)
+
+    if normalized_content_type in {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }:
+        try:
+            return document_processor.process_pdf(file_path)
+        except Exception:
+            return document_processor.process_text(file_path)
+
+    return document_processor.process_text(file_path)
+
+
+def build_note_embeddings(text: str) -> tuple[list[dict], list[list[float]]]:
+    """Chunk note text and generate embeddings that match note_chunks.embedding."""
+    enhanced_chunks = document_processor.chunk_text_enhanced(text)
+    if not enhanced_chunks:
+        raise HTTPException(status_code=500, detail="Failed to chunk document")
+
+    chunk_data: list[dict] = []
+    embeddings: list[list[float]] = []
+    for chunk in enhanced_chunks:
+        chunk_data.append({
+            "content": chunk.text,
+            "token_count": chunk.token_count,
+            "metadata": {
+                "section_header": chunk.section_header,
+                "char_start": chunk.char_start,
+                "char_end": chunk.char_end,
+            },
+        })
+        embeddings.append(notes_rag_engine.generate_embedding(chunk.text))
+
+    return chunk_data, embeddings
+
+
 # ============================================================================
 # Pydantic Models
 # ============================================================================
@@ -88,17 +152,17 @@ class NoteResponse(BaseModel):
     filename: str
     original_filename: str
     file_path: str
-    file_size_bytes: Optional[int]
-    mime_type: Optional[str]
-    title: Optional[str]
-    one_line_summary: Optional[str]
-    brief_summary: Optional[str]
+    file_size_bytes: int | None
+    mime_type: str | None
+    title: str | None
+    one_line_summary: str | None
+    brief_summary: str | None
     created_at: str
     updated_at: str
 
 
 class NoteUpdateRequest(BaseModel):
-    title: Optional[str] = None
+    title: str | None = None
 
 
 # ============================================================================
@@ -109,12 +173,12 @@ class NoteUpdateRequest(BaseModel):
 async def upload_note(
     file: UploadFile = File(...),
     unit_id: str = Form(...),
-    title: Optional[str] = Form(None),
+    title: str | None = Form(None),
     admin: dict = Depends(require_admin)
 ):
     """
     Upload a note file (PDF, DOCX, PPTX, images) to a subject unit.
-    
+
     The file is:
     1. Validated for type
     2. Stored in Supabase Storage (notes bucket)
@@ -124,7 +188,7 @@ async def upload_note(
     """
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
-    
+
     # Validate file type
     ALLOWED_TYPES = [
         "application/pdf",
@@ -135,45 +199,45 @@ async def upload_note(
         "image/jpg",
         "image/webp",
     ]
-    
+
     if file.content_type not in ALLOWED_TYPES:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported file type: {file.content_type}. Allowed: PDF, DOCX, PPTX, PNG, JPG, WEBP"
         )
-    
+
     # Get unit and verify it belongs to this org
     unit = client.table("subject_units").select(
         "id, subject_id, org_id"
     ).eq("id", unit_id).eq("org_id", org_id).single().execute()
-    
+
     if not unit.data:
         raise HTTPException(status_code=404, detail="Unit not found")
-    
+
     # Get subject to get year_id
     subject = client.table("subjects").select(
         "id, year_id"
     ).eq("id", unit.data["subject_id"]).single().execute()
-    
+
     if not subject.data:
         raise HTTPException(status_code=404, detail="Subject not found")
-    
+
     # Get year to get department_id
     year = client.table("years").select(
         "id, department_id"
     ).eq("id", subject.data["year_id"]).single().execute()
-    
+
     if not year.data:
         raise HTTPException(status_code=404, detail="Year not found")
-    
+
     # Get department to get stream_id
     department = client.table("departments").select(
         "id, stream_id"
     ).eq("id", year.data["department_id"]).single().execute()
-    
+
     if not department.data:
         raise HTTPException(status_code=404, detail="Department not found")
-    
+
     # Generate unique filename
     file_ext = os.path.splitext(file.filename)[1].lower()
     unique_filename = f"{uuid_module.uuid4().hex}{file_ext}"
@@ -183,96 +247,61 @@ async def upload_note(
         namespace="notes",
         user_id=admin.get("id"),
     )
-    
+
     # Read file content
     file_content = await file.read()
     file_size = len(file_content)
-    
+
     # Save to temporary file for processing
     temp_dir = "/tmp/notes_uploads"
     os.makedirs(temp_dir, exist_ok=True)
     temp_path = os.path.join(temp_dir, unique_filename)
-    
+    note_id: str | None = None
+    uploaded_file_path: str | None = None
+
     try:
         with open(temp_path, "wb") as f:
             f.write(file_content)
-        
+
         # Upload to Supabase Storage
         storage_result = upload_note_to_storage(
             file_path=object_key,
             file_content=file_content,
             content_type=file.content_type
         )
-        
+
         if not storage_result:
             raise HTTPException(status_code=500, detail="Failed to upload file to storage")
-        
+        uploaded_file_path = object_key
+
         # Process document (extract text based on file type)
         content_type = file.content_type
-        text = ""
-        
-        if content_type == "application/pdf":
-            text = document_processor.process_pdf(temp_path)
-        elif content_type in ["image/png", "image/jpeg", "image/jpg", "image/webp"]:
-            text = document_processor.process_image(temp_path)
-        elif content_type in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                              "application/vnd.openxmlformats-officedocument.presentationml.presentation"]:
-            # For DOCX/PPTX, try PDF extraction first (may need additional processing)
-            # For now, treat as text if it fails
-            try:
-                text = document_processor.process_pdf(temp_path)
-            except Exception:
-                text = document_processor.process_text(temp_path)
-        else:
-            text = document_processor.process_text(temp_path)
-        
+        text = extract_note_text(temp_path, content_type)
+
         if not text or not text.strip():
             raise HTTPException(status_code=500, detail="Failed to extract text from document")
-        
-        # Chunk the text using semantic chunking with metadata
-        enhanced_chunks = document_processor.chunk_text_enhanced(text)
-        
-        if not enhanced_chunks:
-            raise HTTPException(status_code=500, detail="Failed to chunk document")
-        
-        # Convert enhanced chunks to the expected format
-        chunks = [{"text": chunk.text, "token_count": chunk.token_count, "metadata": {
-            "section_header": chunk.section_header,
-            "char_start": chunk.char_start,
-            "char_end": chunk.char_end
-        }} for chunk in enhanced_chunks]
-        
-        # Generate embeddings for each chunk
-        embeddings = []
-        chunk_data = []
-        for chunk in chunks:
-            embedding = rag_engine.generate_embedding(chunk["text"])
-            embeddings.append(embedding)
-            chunk_data.append({
-                "content": chunk["text"],
-                "token_count": chunk.get("token_count"),
-                "metadata": chunk.get("metadata", {})
-            })
-        
+
+        chunk_data, embeddings = build_note_embeddings(text)
+
         # Generate summary
-        full_text = "\n".join([c["text"] for c in chunks[:5]])  # First 5 chunks for summary
+        full_text = "\n".join([chunk["content"] for chunk in chunk_data[:5]])  # First 5 chunks for summary
         try:
             summaries = rag_engine.generate_circular_summary(full_text, file.filename)
         except Exception as e:
             logger.warning(f"Failed to generate summary: {e}")
             summaries = {"one_line": None, "brief": None}
-        
+
         # Generate AI title if not provided
         if not title:
             try:
                 # Get subject name for context
                 subject_info = client.table("subjects").select("name").eq("id", unit.data["subject_id"]).single().execute()
                 subject_name = subject_info.data.get("name") if subject_info.data else None
-                
+
                 # Get unit number for context
                 unit_info = client.table("subject_units").select("unit_number").eq("id", unit_id).single().execute()
                 unit_number = unit_info.data.get("unit_number") if unit_info.data else None
-                
+
                 title = rag_engine.generate_note_title(
                     document_text=full_text,
                     filename=file.filename,
@@ -283,7 +312,7 @@ async def upload_note(
             except Exception as e:
                 logger.warning(f"Failed to generate AI title: {e}")
                 title = file.filename
-        
+
         # Create note record
         note_data = {
             "org_id": org_id,
@@ -302,14 +331,14 @@ async def upload_note(
             "brief_summary": summaries.get("brief"),
             "uploaded_by": admin.get("id"),
         }
-        
+
         note_result = client.table("notes").insert(note_data).execute()
-        
+
         if not note_result.data:
             raise HTTPException(status_code=500, detail="Failed to create note record")
-        
+
         note_id = note_result.data[0]["id"]
-        
+
         # Add chunks to vector store
         chunks_added = notes_vector_store.add_note(
             note_id=note_id,
@@ -322,31 +351,38 @@ async def upload_note(
             chunks=chunk_data,
             embeddings=embeddings
         )
-        
+
+        if chunk_data and chunks_added == 0:
+            raise HTTPException(status_code=500, detail="Failed to create note embeddings")
+
         # Check if this is the first note for this unit and update unit name
         existing_notes = client.table("notes").select("id").eq("unit_id", unit_id).is_("deleted_at", "null").execute()
         if len(existing_notes.data or []) == 1:  # This is the first note
             try:
                 # Generate AI unit name from the note content
-                unit_name_prompt = f"""Based on this academic document content from Unit {unit_number} of {subject_name}, 
+                unit_name_prompt = f"""Based on this academic document content from Unit {unit_number} of {subject_name},
 generate a short descriptive name (3-5 words) for this unit topic.
 
 Document content:
 {full_text[:2000]}
 
 Respond with ONLY the unit name, nothing else. Make it academic and descriptive."""
-                
+
                 unit_name = rag_engine.generate_text(unit_name_prompt)
                 if unit_name and len(unit_name) < 100:
                     client.table("subject_units").update({"name": unit_name.strip()}).eq("id", unit_id).execute()
                     logger.info(f"Updated unit name to: {unit_name.strip()}")
             except Exception as e:
                 logger.warning(f"Failed to generate AI unit name: {e}")
-        
+
         logger.info(f"Uploaded note: {file.filename} -> {unique_filename} ({chunks_added} chunks)")
-        
+
         return note_result.data[0]
-        
+
+    except Exception:
+        cleanup_failed_note_upload(note_id, uploaded_file_path)
+        raise
+
     finally:
         # Cleanup temp file
         if os.path.exists(temp_path):
@@ -359,18 +395,18 @@ Respond with ONLY the unit name, nothing else. Make it academic and descriptive.
 
 @router.get("", response_model=list[NoteResponse])
 async def list_notes(
-    unit_id: Optional[str] = None,
-    subject_id: Optional[str] = None,
-    year_id: Optional[str] = None,
+    unit_id: str | None = None,
+    subject_id: str | None = None,
+    year_id: str | None = None,
     include_deleted: bool = False,
     admin: dict = Depends(require_admin)
 ):
     """List notes with optional filters."""
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
-    
+
     query = client.table("notes").select("*").eq("org_id", org_id).order("created_at", desc=True)
-    
+
     if unit_id:
         query = query.eq("unit_id", unit_id)
     if subject_id:
@@ -379,7 +415,7 @@ async def list_notes(
         query = query.eq("year_id", year_id)
     if not include_deleted:
         query = query.is_("deleted_at", "null")
-    
+
     result = query.execute()
     return result.data or []
 
@@ -392,12 +428,12 @@ async def get_note(
     """Get a specific note by ID."""
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
-    
+
     result = client.table("notes").select("*").eq("id", note_id).eq("org_id", org_id).single().execute()
-    
+
     if not result.data:
         raise HTTPException(status_code=404, detail="Note not found")
-    
+
     return result.data
 
 
@@ -414,17 +450,17 @@ async def update_note(
     """Update note metadata."""
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
-    
+
     update_data = {k: v for k, v in request.dict().items() if v is not None}
-    
+
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
-    
+
     result = client.table("notes").update(update_data).eq("id", note_id).eq("org_id", org_id).execute()
-    
+
     if not result.data:
         raise HTTPException(status_code=404, detail="Note not found")
-    
+
     return result.data[0]
 
 
@@ -441,31 +477,31 @@ async def delete_note(
     """
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
-    
+
     # Verify note exists
     note = client.table("notes").select("id, filename, file_path").eq("id", note_id).eq("org_id", org_id).single().execute()
     if not note.data:
         raise HTTPException(status_code=404, detail="Note not found")
-    
+
     if hard_delete:
         # Delete chunks
         notes_vector_store.delete_note_chunks(note_id)
-        
+
         # Delete from storage
         try:
             delete_note_from_storage(note.data["file_path"])
         except Exception as e:
             logger.warning(f"Failed to delete file from storage: {e}")
-        
+
         # Delete note record
         client.table("notes").delete().eq("id", note_id).execute()
-        
+
         logger.info(f"Hard deleted note: {note.data['filename']}")
         return {"success": True, "message": "Note permanently deleted"}
     else:
         # Soft delete
         client.table("notes").update({"deleted_at": datetime.utcnow().isoformat()}).eq("id", note_id).execute()
-        
+
         logger.info(f"Soft deleted note: {note.data['filename']}")
         return {"success": True, "message": "Note archived"}
 
@@ -478,12 +514,12 @@ async def restore_note(
     """Restore a soft-deleted note."""
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
-    
+
     result = client.table("notes").update({"deleted_at": None}).eq("id", note_id).eq("org_id", org_id).execute()
-    
+
     if not result.data:
         raise HTTPException(status_code=404, detail="Note not found")
-    
+
     logger.info(f"Restored note: {result.data[0]['filename']}")
     return {"success": True, "message": "Note restored"}
 
@@ -503,54 +539,37 @@ async def reembed_note(
     """
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
-    
+
     # Get note
     note = client.table("notes").select("*").eq("id", note_id).eq("org_id", org_id).single().execute()
     if not note.data:
         raise HTTPException(status_code=404, detail="Note not found")
-    
+
     note_data = note.data
-    
+
     # Download file from storage
     file_content = download_note_from_storage(note_data["file_path"])
     if not file_content:
         raise HTTPException(status_code=500, detail="Failed to download file from storage")
-    
+
     # Save to temp file
     temp_dir = "/tmp/notes_uploads"
     os.makedirs(temp_dir, exist_ok=True)
     temp_path = os.path.join(temp_dir, note_data["filename"])
-    
+
     try:
         with open(temp_path, "wb") as f:
             f.write(file_content)
-        
-        # Process document
-        chunks_result = document_processor.process_document(
-            file_path=temp_path,
-            source_file=note_data["filename"]
-        )
-        
-        if not chunks_result or not chunks_result.get("chunks"):
-            raise HTTPException(status_code=500, detail="Failed to process document")
-        
-        chunks = chunks_result["chunks"]
-        
-        # Generate new embeddings
-        embeddings = []
-        chunk_data = []
-        for chunk in chunks:
-            embedding = rag_engine.generate_embedding(chunk["text"])
-            embeddings.append(embedding)
-            chunk_data.append({
-                "content": chunk["text"],
-                "token_count": chunk.get("token_count"),
-                "metadata": chunk.get("metadata", {})
-            })
-        
+
+        text = extract_note_text(temp_path, note_data.get("mime_type"))
+        if not text or not text.strip():
+            raise HTTPException(status_code=500, detail="Failed to extract text from document")
+
+        chunk_data, embeddings = build_note_embeddings(text)
+
         # Delete old chunks
         notes_vector_store.delete_note_chunks(note_id)
-        
+
         # Add new chunks
         chunks_added = notes_vector_store.add_note(
             note_id=note_id,
@@ -563,14 +582,17 @@ async def reembed_note(
             chunks=chunk_data,
             embeddings=embeddings
         )
-        
+
+        if chunk_data and chunks_added == 0:
+            raise HTTPException(status_code=500, detail="Failed to recreate note embeddings")
+
         logger.info(f"Re-embedded note: {note_data['filename']} ({chunks_added} chunks)")
-        
+
         return {
             "success": True,
             "message": f"Note re-embedded with {chunks_added} chunks"
         }
-        
+
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -587,12 +609,12 @@ async def get_notes_stats(
     """Get notes statistics for the organization."""
     client = get_supabase_admin_client()
     org_id = admin.get("org_id")
-    
+
     result = client.rpc("get_notes_stats", {"filter_org_id": org_id}).execute()
-    
+
     if result.data:
         return result.data[0] if isinstance(result.data, list) else result.data
-    
+
     return {
         "total_subjects": 0,
         "total_notes": 0,
